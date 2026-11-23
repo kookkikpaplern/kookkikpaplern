@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { ChevronDown, ChevronUp, X } from 'lucide-react';
-import { FaqItem } from '../config/shopConfig';
+import { FaqItem, SHOP_CONFIG } from '../config/shopConfig';
 import { translateFaq, useLang } from '../config/i18n';
 import { playSoftClick } from '../utils/sound';
 
@@ -10,6 +10,8 @@ interface QuickFaqModalProps {
   faqs: FaqItem[];
   shopNameTh: string;
   foodShopNameTh: string;
+  faqModalTitle?: string;
+  faqModalSubtitle?: string;
 }
 
 export const QuickFaqModal: React.FC<QuickFaqModalProps> = ({
@@ -18,11 +20,22 @@ export const QuickFaqModal: React.FC<QuickFaqModalProps> = ({
   faqs,
   shopNameTh,
   foodShopNameTh,
+  faqModalTitle = SHOP_CONFIG.faqModalTitle,
+  faqModalSubtitle = SHOP_CONFIG.faqModalSubtitle,
 }) => {
   const { lang, tx } = useLang();
   const [openId, setOpenId] = useState<string | null>(faqs[0]?.id ?? null);
 
   if (!isOpen) return null;
+
+  const displayTitle =
+    lang === 'en' && faqModalTitle.trim() === SHOP_CONFIG.faqModalTitle
+      ? 'Little Bear Q&A Assistant'
+      : faqModalTitle;
+  const displaySubtitle =
+    lang === 'en' && faqModalSubtitle.trim() === SHOP_CONFIG.faqModalSubtitle
+      ? 'Tap any question below'
+      : faqModalSubtitle;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
@@ -44,13 +57,12 @@ export const QuickFaqModal: React.FC<QuickFaqModalProps> = ({
             </span>
             <div>
               <h2 className="text-lg font-bold" style={{ color: 'var(--text-main)' }}>
-                {tx('น้องหมีช่วยตอบ (ถาม-ตอบอัตโนมัติ)', 'Little Bear Q&A Assistant')}
+                {displayTitle}
               </h2>
               <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                {tx(
-                  `${shopNameTh} & ${foodShopNameTh} · กดเลือกคำถามที่สงสัยได้เลยค่ะ`,
-                  'kookkikpaplern & Krua Mae Wang · Tap any question below'
-                )}
+                {lang === 'en'
+                  ? `kookkikpaplern & Krua Mae Wang · ${displaySubtitle}`
+                  : `${shopNameTh} & ${foodShopNameTh} · ${displaySubtitle}`}
               </p>
             </div>
           </div>

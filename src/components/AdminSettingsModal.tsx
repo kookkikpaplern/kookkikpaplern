@@ -78,6 +78,12 @@ interface AdminSettingsModalProps {
   onChangePromoTitle: (val: string) => void;
   promoSubtitle: string;
   onChangePromoSubtitle: (val: string) => void;
+  faqBubbleText: string;
+  onChangeFaqBubbleText: (val: string) => void;
+  faqModalTitle: string;
+  onChangeFaqModalTitle: (val: string) => void;
+  faqModalSubtitle: string;
+  onChangeFaqModalSubtitle: (val: string) => void;
   faqs: FaqItem[];
   onChangeFaqs: (next: FaqItem[]) => void;
   rewardOffers: RewardOffer[];
@@ -122,6 +128,12 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   onChangePromoTitle,
   promoSubtitle,
   onChangePromoSubtitle,
+  faqBubbleText,
+  onChangeFaqBubbleText,
+  faqModalTitle,
+  onChangeFaqModalTitle,
+  faqModalSubtitle,
+  onChangeFaqModalSubtitle,
   faqs,
   onChangeFaqs,
   rewardOffers,
@@ -527,6 +539,54 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
     );
   };
 
+  const handlePushFaqsToSheets = async () => {
+    playSoftClick();
+    if (!scriptUrl.trim()) {
+      setStatusMsg(
+        tx(
+          'กรุณาใส่ลิงก์ Google Apps Script URL ในแท็บ "Google Sheets หลังบ้าน" ก่อนนะคะ',
+          'Please enter your Google Apps Script URL in the "Google Sheets" tab first.'
+        )
+      );
+      return;
+    }
+    setSyncing(true);
+    const [resFaq, resSettings] = await Promise.all([
+      postToSheets(scriptUrl, 'ถามตอบลูกค้า', { faqs }),
+      postToSheets(scriptUrl, 'ตั้งค่าระบบ', {
+        settings: {
+          orgCode,
+          shopNameTh,
+          shopNameEn,
+          foodShopNameTh,
+          foodShopNameEn,
+          promptPayId,
+          promptPayAccountName,
+          rewardNotice,
+          promoTitle,
+          promoSubtitle,
+          faqBubbleText,
+          faqModalTitle,
+          faqModalSubtitle,
+          onlineOrderEnabled: String(onlineOrderEnabled),
+          enableAutoPaymentCheck: String(enableAutoPaymentCheck),
+        },
+      }),
+    ]);
+    setSyncing(false);
+    setStatusMsg(
+      resFaq.sent && resSettings.sent
+        ? tx(
+            `ส่งข้อความถาม-ตอบหน้าแรก (${faqs.length} ข้อ) ขึ้น Google Sheets เรียบร้อยแล้วค่ะ`,
+            `Pushed home Q&A copy and ${faqs.length} FAQ items to Google Sheets!`
+          )
+        : tx(
+            'บันทึกเข้าคิวออฟไลน์แล้ว ระบบจะส่งขึ้น Google Sheets เมื่อต่อเน็ตค่ะ',
+            'Saved to offline queue; will sync once back online.'
+          )
+    );
+  };
+
   const handlePushAllToSheets = async () => {
     playSoftClick();
     if (!scriptUrl.trim()) {
@@ -556,6 +616,9 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
         rewardNotice,
         promoTitle,
         promoSubtitle,
+        faqBubbleText,
+        faqModalTitle,
+        faqModalSubtitle,
         onlineOrderEnabled: String(onlineOrderEnabled),
         enableAutoPaymentCheck: String(enableAutoPaymentCheck),
       },
@@ -625,7 +688,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
             { id: 'general', label: tx('ธีม & โหมดร้าน', 'Themes & Mode'), icon: Palette },
             { id: 'products', label: tx('สินค้าบาร์โค้ด (Excel)', 'Products & Excel'), icon: Barcode },
             { id: 'summary', label: tx('สรุปยอด / LINE / Excel', 'Summary / LINE / Excel'), icon: FileSpreadsheet },
-            { id: 'faq', label: tx('โปรโมชัน / แลกดาว / FAQ', 'Promos / Rewards / FAQ'), icon: MessageCircleQuestion },
+            { id: 'faq', label: tx('โปรโมชัน / ถาม-ตอบหน้าแรก', 'Promos / Home Q&A'), icon: MessageCircleQuestion },
             { id: 'sheets', label: tx('Google Sheets หลังบ้าน', 'Google Sheets'), icon: Database },
           ].map((tab) => {
             const Icon = tab.icon;
@@ -1932,10 +1995,85 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                 </div>
               </div>
 
-              <div className="space-y-3 border-t pt-4" style={{ borderColor: 'var(--border-soft)' }}>
-                <h3 className="text-base font-bold">
-                  {tx('💬 จัดการรายการ "ถาม-ตอบด่วน"', '💬 Manage "Quick FAQ" Items')}
-                </h3>
+              <div className="space-y-4 border-t pt-4" style={{ borderColor: 'var(--border-soft)' }}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-base font-bold flex items-center gap-1.5">
+                      <MessageCircle className="w-4 h-4" style={{ color: 'var(--accent-primary)' }} />
+                      {tx('จัดการข้อความถาม-ตอบหน้าแรก (น้องหมีช่วยตอบ)', 'Manage Home Screen Q&A (Little Bear)')}
+                    </h3>
+                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                      {tx(
+                        'แก้ไขข้อความบอลลูนบนหัวน้องหมี หัวข้อหน้าต่าง และคำถาม-คำตอบที่แสดงบนหน้าแรกได้ทันที',
+                        'Edit the bear speech bubble, modal heading, and Q&A items shown on the home page'
+                      )}
+                    </p>
+                  </div>
+                  {scriptUrl.trim() && (
+                    <button
+                      type="button"
+                      disabled={syncing}
+                      onClick={handlePushFaqsToSheets}
+                      className="px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                      style={{
+                        backgroundColor: 'var(--pastel-blue)',
+                        borderColor: 'var(--border-soft)',
+                        color: 'var(--pastel-blue-text)',
+                      }}
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+                      {tx('ส่งถาม-ตอบขึ้น Google Sheets', 'Push Q&A to Google Sheets')}
+                    </button>
+                  )}
+                </div>
+
+                {/* Home Bubble & Modal Header Settings */}
+                <div
+                  className="rounded-2xl border p-4 space-y-3"
+                  style={{ backgroundColor: 'var(--accent-soft)', borderColor: 'var(--accent-border)' }}
+                >
+                  <div>
+                    <label className="block text-sm font-semibold mb-1" style={{ color: 'var(--accent-text)' }}>
+                      {tx('ข้อความบอลลูนบนหัวน้องหมี (หน้าแรก)', 'Overhead Bear Speech Bubble (Home Page)')}
+                    </label>
+                    <input
+                      type="text"
+                      value={faqBubbleText}
+                      onChange={(e) => onChangeFaqBubbleText(e.target.value)}
+                      placeholder={tx('เช่น มีอะไรสงสัยสอบถามได้นะคะ อยากตอบจังเลย', 'e.g. Have a question? Tap me!')}
+                      className="w-full h-11 px-3.5 rounded-2xl border text-sm"
+                      style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                    />
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-sm font-semibold mb-1" style={{ color: 'var(--accent-text)' }}>
+                        {tx('หัวข้อหน้าต่างถาม-ตอบ', 'Q&A Modal Title')}
+                      </label>
+                      <input
+                        type="text"
+                        value={faqModalTitle}
+                        onChange={(e) => onChangeFaqModalTitle(e.target.value)}
+                        placeholder={tx('เช่น น้องหมีช่วยตอบ (ถาม-ตอบอัตโนมัติ)', 'e.g. Little Bear Q&A Assistant')}
+                        className="w-full h-11 px-3.5 rounded-2xl border text-sm"
+                        style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-semibold mb-1" style={{ color: 'var(--accent-text)' }}>
+                        {tx('คำโปรยใต้หัวข้อถาม-ตอบ', 'Q&A Modal Subtitle')}
+                      </label>
+                      <input
+                        type="text"
+                        value={faqModalSubtitle}
+                        onChange={(e) => onChangeFaqModalSubtitle(e.target.value)}
+                        placeholder={tx('เช่น กดเลือกคำถามที่สงสัยได้เลยค่ะ', 'e.g. Tap any question below')}
+                        className="w-full h-11 px-3.5 rounded-2xl border text-sm"
+                        style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                      />
+                    </div>
+                  </div>
+                </div>
 
                 {/* Add New FAQ */}
                 <form
@@ -1943,6 +2081,9 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                   className="rounded-2xl border p-4 space-y-2.5"
                   style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
                 >
+                  <p className="text-xs font-bold" style={{ color: 'var(--text-muted)' }}>
+                    {tx('เพิ่มคำถาม-คำตอบใหม่', 'Add New Q&A Item')}
+                  </p>
                   <input
                     type="text"
                     value={newQuestion}
@@ -1971,34 +2112,39 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
 
                 {/* Existing FAQs */}
                 <div className="space-y-2.5">
-                  {faqs.map((f) => (
+                  {faqs.map((f, idx) => (
                     <div
                       key={f.id}
                       className="rounded-2xl border p-3.5 space-y-2"
                       style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
                     >
-                      <div className="flex items-center gap-2">
-                        <input
-                          type="text"
-                          value={f.question}
-                          onChange={(e) => handleUpdateFaq(f.id, 'question', e.target.value)}
-                          className="flex-1 h-10 px-3 rounded-xl border text-sm font-semibold"
-                          style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
-                        />
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[11px] font-bold" style={{ color: 'var(--text-muted)' }}>
+                          {tx(`คำถามข้อที่ ${idx + 1}`, `Question #${idx + 1}`)}
+                        </span>
                         <button
                           type="button"
                           onClick={() => handleDeleteFaq(f.id)}
-                          className="w-10 h-10 rounded-xl flex items-center justify-center cursor-pointer"
+                          className="w-9 h-9 rounded-xl flex items-center justify-center cursor-pointer"
                           style={{ backgroundColor: 'var(--pastel-pink)', color: 'var(--pastel-pink-text)' }}
                           aria-label={tx('ลบคำถาม', 'Delete question')}
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
                       </div>
+                      <input
+                        type="text"
+                        value={f.question}
+                        onChange={(e) => handleUpdateFaq(f.id, 'question', e.target.value)}
+                        placeholder={tx('คำถาม...', 'Question...')}
+                        className="w-full h-10 px-3 rounded-xl border text-sm font-semibold"
+                        style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                      />
                       <textarea
                         rows={2}
                         value={f.answer}
                         onChange={(e) => handleUpdateFaq(f.id, 'answer', e.target.value)}
+                        placeholder={tx('คำตอบ...', 'Answer...')}
                         className="w-full p-2.5 rounded-xl border text-xs sm:text-sm"
                         style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
                       />
@@ -2077,8 +2223,8 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                   <li>
                     <strong>ตั้งค่าระบบ</strong>{' '}
                     {tx(
-                      '(คอลัมน์ A: key, B: value เช่น orgCode, shopNameTh, foodShopNameTh, promptPayId, rewardNotice, promoTitle, promoSubtitle)',
-                      '(Col A: key, Col B: value — orgCode, shopNameTh, foodShopNameTh, promptPayId, rewardNotice, promoTitle, promoSubtitle)'
+                      '(คอลัมน์ A: key, B: value เช่น orgCode, shopNameTh, foodShopNameTh, promptPayId, rewardNotice, promoTitle, promoSubtitle, faqBubbleText, faqModalTitle, faqModalSubtitle)',
+                      '(Col A: key, Col B: value — orgCode, shopNameTh, foodShopNameTh, promptPayId, rewardNotice, promoTitle, promoSubtitle, faqBubbleText, faqModalTitle, faqModalSubtitle)'
                     )}
                   </li>
                   <li>

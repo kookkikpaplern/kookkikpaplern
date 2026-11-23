@@ -85,6 +85,9 @@ const KEYS = {
   REWARD_NOTICE: 'kkp_reward_notice',
   PROMO_TITLE: 'kkp_promo_title',
   PROMO_SUBTITLE: 'kkp_promo_subtitle',
+  FAQ_BUBBLE: 'kkp_faq_bubble_text',
+  FAQ_TITLE: 'kkp_faq_modal_title',
+  FAQ_SUBTITLE: 'kkp_faq_modal_subtitle',
   ONLINE_ORDER: 'kkp_online_order_enabled',
   AUTO_CHECK: 'kkp_auto_payment_check',
   QUEUE: 'kkp_customer_queue',
@@ -212,6 +215,15 @@ export default function App() {
   );
   const [promoSubtitle, setPromoSubtitle] = useState<string>(
     () => localStorage.getItem(KEYS.PROMO_SUBTITLE) || SHOP_CONFIG.promoSubtitle
+  );
+  const [faqBubbleText, setFaqBubbleText] = useState<string>(
+    () => localStorage.getItem(KEYS.FAQ_BUBBLE) || SHOP_CONFIG.faqBubbleText
+  );
+  const [faqModalTitle, setFaqModalTitle] = useState<string>(
+    () => localStorage.getItem(KEYS.FAQ_TITLE) || SHOP_CONFIG.faqModalTitle
+  );
+  const [faqModalSubtitle, setFaqModalSubtitle] = useState<string>(
+    () => localStorage.getItem(KEYS.FAQ_SUBTITLE) || SHOP_CONFIG.faqModalSubtitle
   );
   const [faqs, setFaqs] = useState<FaqItem[]>(() => loadCachedFaqs() || SHOP_CONFIG.faqs);
   const [rewardOffers, setRewardOffers] = useState<RewardOffer[]>(
@@ -436,6 +448,18 @@ export default function App() {
       if (s.promoSubtitle) {
         setPromoSubtitle(s.promoSubtitle);
         localStorage.setItem(KEYS.PROMO_SUBTITLE, s.promoSubtitle);
+      }
+      if (s.faqBubbleText) {
+        setFaqBubbleText(s.faqBubbleText);
+        localStorage.setItem(KEYS.FAQ_BUBBLE, s.faqBubbleText);
+      }
+      if (s.faqModalTitle) {
+        setFaqModalTitle(s.faqModalTitle);
+        localStorage.setItem(KEYS.FAQ_TITLE, s.faqModalTitle);
+      }
+      if (s.faqModalSubtitle) {
+        setFaqModalSubtitle(s.faqModalSubtitle);
+        localStorage.setItem(KEYS.FAQ_SUBTITLE, s.faqModalSubtitle);
       }
       if (s.onlineOrderEnabled !== undefined) {
         const val = s.onlineOrderEnabled.toLowerCase() !== 'false';
@@ -722,6 +746,7 @@ export default function App() {
           promoTitle={promoTitle}
           promoSubtitle={promoSubtitle}
           rewardNotice={rewardNotice}
+          faqBubbleText={faqBubbleText}
           logoUrl={logoUrl}
           outfits={bearOutfits}
           onEnterCustomerOrder={() => {
@@ -740,6 +765,8 @@ export default function App() {
           faqs={faqs}
           shopNameTh={shopNameTh}
           foodShopNameTh={foodShopNameTh}
+          faqModalTitle={faqModalTitle}
+          faqModalSubtitle={faqModalSubtitle}
         />
         <MemberRewardsModal
           isOpen={memberRewardsOpen}
@@ -910,6 +937,8 @@ export default function App() {
           faqs={faqs}
           shopNameTh={shopNameTh}
           foodShopNameTh={foodShopNameTh}
+          faqModalTitle={faqModalTitle}
+          faqModalSubtitle={faqModalSubtitle}
         />
 
         <CashPaymentModal
@@ -1708,6 +1737,21 @@ export default function App() {
           onChangePromoSubtitle={(val) => {
             setPromoSubtitle(val);
             localStorage.setItem(KEYS.PROMO_SUBTITLE, val);
+          }}
+          faqBubbleText={faqBubbleText}
+          onChangeFaqBubbleText={(val) => {
+            setFaqBubbleText(val);
+            localStorage.setItem(KEYS.FAQ_BUBBLE, val);
+          }}
+          faqModalTitle={faqModalTitle}
+          onChangeFaqModalTitle={(val) => {
+            setFaqModalTitle(val);
+            localStorage.setItem(KEYS.FAQ_TITLE, val);
+          }}
+          faqModalSubtitle={faqModalSubtitle}
+          onChangeFaqModalSubtitle={(val) => {
+            setFaqModalSubtitle(val);
+            localStorage.setItem(KEYS.FAQ_SUBTITLE, val);
           }}
           faqs={faqs}
           onChangeFaqs={(next) => {

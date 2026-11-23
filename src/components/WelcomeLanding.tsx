@@ -17,6 +17,7 @@ import {
   translateRewardNotice,
   useLang,
 } from '../config/i18n';
+import { SHOP_CONFIG } from '../config/shopConfig';
 import { playSoftClick } from '../utils/sound';
 import { BearGangMascot } from './BearGangMascot';
 
@@ -28,6 +29,7 @@ interface WelcomeLandingProps {
   promoTitle: string;
   promoSubtitle: string;
   rewardNotice: string;
+  faqBubbleText: string;
   logoUrl: string | null;
   outfits: BearFamilyOutfits;
   onEnterCustomerOrder: () => void;
@@ -44,6 +46,7 @@ export const WelcomeLanding: React.FC<WelcomeLandingProps> = ({
   promoTitle,
   promoSubtitle,
   rewardNotice,
+  faqBubbleText,
   logoUrl,
   outfits,
   onEnterCustomerOrder,
@@ -185,10 +188,9 @@ export const WelcomeLanding: React.FC<WelcomeLandingProps> = ({
                 >
                   <MessageCircle className="w-4 h-4 shrink-0" style={{ color: 'var(--accent-primary)' }} />
                   <span>
-                    {tx(
-                      'มีอะไรสงสัยสอบถามได้นะคะ อยากตอบจังเลย',
-                      'Have a question? Tap me—I’d love to answer!'
-                    )}
+                    {lang === 'en' && faqBubbleText.trim() === SHOP_CONFIG.faqBubbleText
+                      ? 'Have a question? Tap me—I’d love to answer!'
+                      : faqBubbleText}
                   </span>
                 </div>
                 {/* Downward Speech Bubble Tail */}
