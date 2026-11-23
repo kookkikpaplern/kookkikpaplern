@@ -1,0 +1,2154 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Barcode,
+  Camera,
+  Check,
+  Copy,
+  Database,
+  Download,
+  FileSpreadsheet,
+  Gift,
+  ImagePlus,
+  MessageCircle,
+  MessageCircleQuestion,
+  Palette,
+  Plus,
+  RefreshCw,
+  Search,
+  ShieldAlert,
+  Star,
+  Trash2,
+  Upload,
+  Wifi,
+  X,
+} from 'lucide-react';
+import { FaqItem, MenuItem, RewardOffer, StaffUser, THEME_OPTIONS, ThemeId } from '../config/shopConfig';
+import { compressProductImageFile } from '../utils/imageUpload';
+import {
+  translateCategory,
+  translateMenuName,
+  translateStatus,
+  translateThemeOption,
+  useLang,
+} from '../config/i18n';
+import {
+  APPS_SCRIPT_TEMPLATE,
+  buildLineDailySummary,
+  exportSalesToExcelCsv,
+  getOfflineQueue,
+  getSaleHistoryLogs,
+  getSilentVoidLogs,
+  postToSheets,
+} from '../utils/sheetsSync';
+import {
+  downloadProductExcelXlsx,
+  mergeImportedMenuItems,
+  ParsedExcelProductsResult,
+  parseProductsFromExcelFile,
+} from '../utils/excelProducts';
+import { playSoftClick } from '../utils/sound';
+
+export type AdminSettingsTab = 'general' | 'products' | 'faq' | 'summary' | 'sheets';
+
+interface AdminSettingsModalProps {
+  isOpen: boolean;
+  initialTab?: AdminSettingsTab;
+  onClose: () => void;
+  themeId: ThemeId;
+  onChangeTheme: (id: ThemeId) => void;
+  orgCode: string;
+  staffUsers: Record<string, StaffUser>;
+  shopNameTh: string;
+  onChangeShopNameTh: (val: string) => void;
+  shopNameEn: string;
+  onChangeShopNameEn: (val: string) => void;
+  foodShopNameTh: string;
+  onChangeFoodShopNameTh: (val: string) => void;
+  foodShopNameEn: string;
+  onChangeFoodShopNameEn: (val: string) => void;
+  promptPayId: string;
+  onChangePromptPayId: (val: string) => void;
+  promptPayAccountName: string;
+  onChangePromptPayAccountName: (val: string) => void;
+  scriptUrl: string;
+  onChangeScriptUrl: (val: string) => void;
+  rewardNotice: string;
+  onChangeRewardNotice: (val: string) => void;
+  promoTitle: string;
+  onChangePromoTitle: (val: string) => void;
+  promoSubtitle: string;
+  onChangePromoSubtitle: (val: string) => void;
+  faqs: FaqItem[];
+  onChangeFaqs: (next: FaqItem[]) => void;
+  rewardOffers: RewardOffer[];
+  onChangeRewardOffers: (next: RewardOffer[]) => void;
+  menuItems: MenuItem[];
+  onChangeMenuItems: (next: MenuItem[]) => void;
+  onlineOrderEnabled: boolean;
+  onToggleOnlineOrder: (val: boolean) => void;
+  isTestMode: boolean;
+  onToggleTestMode: (val: boolean) => void;
+  enableAutoPaymentCheck: boolean;
+  onToggleAutoPaymentCheck: (val: boolean) => void;
+  onSyncAllNow: () => Promise<string>;
+  onFlushQueueNow: () => Promise<number>;
+}
+
+export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
+  isOpen,
+  initialTab = 'general',
+  onClose,
+  themeId,
+  onChangeTheme,
+  orgCode,
+  staffUsers,
+  shopNameTh,
+  onChangeShopNameTh,
+  shopNameEn,
+  onChangeShopNameEn,
+  foodShopNameTh,
+  onChangeFoodShopNameTh,
+  foodShopNameEn,
+  onChangeFoodShopNameEn,
+  promptPayId,
+  onChangePromptPayId,
+  promptPayAccountName,
+  onChangePromptPayAccountName,
+  scriptUrl,
+  onChangeScriptUrl,
+  rewardNotice,
+  onChangeRewardNotice,
+  promoTitle,
+  onChangePromoTitle,
+  promoSubtitle,
+  onChangePromoSubtitle,
+  faqs,
+  onChangeFaqs,
+  rewardOffers,
+  onChangeRewardOffers,
+  menuItems,
+  onChangeMenuItems,
+  onlineOrderEnabled,
+  onToggleOnlineOrder,
+  isTestMode,
+  onToggleTestMode,
+  enableAutoPaymentCheck,
+  onToggleAutoPaymentCheck,
+  onSyncAllNow,
+  onFlushQueueNow,
+}) => {
+  const { lang, tx } = useLang();
+  const [activeTab, setActiveTab] = useState<AdminSettingsTab>(initialTab);
+  const [copiedScript, setCopiedScript] = useState(false);
+  const [copiedLine, setCopiedLine] = useState(false);
+  const [statusMsg, setStatusMsg] = useState('');
+  const [syncing, setSyncing] = useState(false);
+
+  // Add FAQ state
+  const [newQuestion, setNewQuestion] = useState('');
+  const [newAnswer, setNewAnswer] = useState('');
+
+  // Add Reward Offer state
+  const [newRewardTitle, setNewRewardTitle] = useState('');
+  const [newRewardStars, setNewRewardStars] = useState('50');
+  const [newRewardDesc, setNewRewardDesc] = useState('');
+  const [newRewardTerms, setNewRewardTerms] = useState('');
+  const [newRewardExpiry, setNewRewardExpiry] = useState('31 ธันวาคม 2569');
+
+  // Excel Barcode Product Importer & Catalog Manager state
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const newProdImageInputRef = useRef<HTMLInputElement>(null);
+  const editProdImageInputRef = useRef<HTMLInputElement>(null);
+  const [editingImageItemId, setEditingImageItemId] = useState<string | null>(null);
+  const [excelPreview, setExcelPreview] = useState<ParsedExcelProductsResult | null>(null);
+  const [importMode, setImportMode] = useState<'merge' | 'replace'>('merge');
+  const [productSearch, setProductSearch] = useState('');
+  const [newProdBarcode, setNewProdBarcode] = useState('');
+  const [newProdName, setNewProdName] = useState('');
+  const [newProdPrice, setNewProdPrice] = useState('');
+  const [newProdStars, setNewProdStars] = useState('2');
+  const [newProdCategory, setNewProdCategory] = useState('อาหารจานเดียว');
+  const [newProdImageUrl, setNewProdImageUrl] = useState('');
+
+  const filteredProducts = useMemo(() => {
+    const q = productSearch.trim().toLowerCase();
+    if (!q) return menuItems;
+    return menuItems.filter(
+      (m) =>
+        m.name.toLowerCase().includes(q) ||
+        m.barcode.toLowerCase().includes(q) ||
+        m.category.toLowerCase().includes(q)
+    );
+  }, [menuItems, productSearch]);
+
+  useEffect(() => {
+    if (isOpen) {
+      setActiveTab(initialTab);
+      setStatusMsg('');
+      setExcelPreview(null);
+    }
+  }, [isOpen, initialTab]);
+
+  if (!isOpen) return null;
+
+  const offlineQueue = getOfflineQueue();
+  const saleLogs = getSaleHistoryLogs();
+  const voidLogs = getSilentVoidLogs();
+  const lineSummary = buildLineDailySummary(saleLogs, shopNameTh, foodShopNameTh, {
+    id: promptPayId,
+    accountName: promptPayAccountName,
+  });
+  const lineShareUrl = `https://line.me/R/msg/text/?${encodeURIComponent(lineSummary.text)}`;
+
+  const handleCopyScript = async () => {
+    playSoftClick();
+    try {
+      await navigator.clipboard.writeText(APPS_SCRIPT_TEMPLATE);
+      setCopiedScript(true);
+      setTimeout(() => setCopiedScript(false), 2500);
+    } catch {
+      setStatusMsg(
+        tx(
+          'กรุณาคัดลอกโค้ดด้วยตนเองจากกล่องด้านล่างค่ะ',
+          'Please manually copy the script code from the box below.'
+        )
+      );
+    }
+  };
+
+  const handleCopyLineSummary = async () => {
+    playSoftClick();
+    try {
+      await navigator.clipboard.writeText(lineSummary.text);
+      setCopiedLine(true);
+      setTimeout(() => setCopiedLine(false), 2500);
+    } catch {
+      setStatusMsg(
+        tx(
+          'ไม่สามารถคัดลอกอัตโนมัติได้ กรุณาคัดลอกข้อความในกล่องด้านบนค่ะ',
+          'Auto-copy blocked; please copy the summary text above.'
+        )
+      );
+    }
+  };
+
+  const handleSyncAll = async () => {
+    playSoftClick();
+    setSyncing(true);
+    setStatusMsg('');
+    const msg = await onSyncAllNow();
+    setSyncing(false);
+    setStatusMsg(msg);
+  };
+
+  const handleFlushQueue = async () => {
+    playSoftClick();
+    setSyncing(true);
+    const count = await onFlushQueueNow();
+    setSyncing(false);
+    setStatusMsg(
+      count > 0
+        ? tx(`ส่งข้อมูลที่ค้าง ${count} รายการเข้าชีตสำเร็จค่ะ`, `Flushed ${count} offline items to Google Sheets.`)
+        : tx('ไม่มีรายการค้างส่ง หรือยังไม่ได้ใส่ลิงก์ชีตค่ะ', 'No pending offline items or missing Script URL.')
+    );
+  };
+
+  const handleAddFaq = (e: React.FormEvent) => {
+    e.preventDefault();
+    playSoftClick();
+    if (!newQuestion.trim() || !newAnswer.trim()) return;
+    const next: FaqItem[] = [
+      ...faqs,
+      {
+        id: `faq_${Date.now()}`,
+        question: newQuestion.trim(),
+        answer: newAnswer.trim(),
+      },
+    ];
+    onChangeFaqs(next);
+    setNewQuestion('');
+    setNewAnswer('');
+    setStatusMsg(tx('เพิ่มคำถาม-คำตอบด่วนเรียบร้อยแล้วค่ะ', 'Quick FAQ item added!'));
+  };
+
+  const handleUpdateFaq = (id: string, field: 'question' | 'answer', value: string) => {
+    onChangeFaqs(faqs.map((f) => (f.id === id ? { ...f, [field]: value } : f)));
+  };
+
+  const handleDeleteFaq = (id: string) => {
+    playSoftClick();
+    onChangeFaqs(faqs.filter((f) => f.id !== id));
+  };
+
+  const handleExcelFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    playSoftClick();
+    setStatusMsg('');
+    try {
+      const parsed = await parseProductsFromExcelFile(file);
+      if (parsed.items.length === 0) {
+        setExcelPreview(null);
+        setStatusMsg(
+          parsed.warnings[0] ||
+            tx(
+              'ไม่พบข้อมูลสินค้าในไฟล์ กรุณาตรวจสอบหัวตาราง (เลขบาร์โค้ด, ชื่อสินค้า, ราคา) ค่ะ',
+              'No products found in file. Please check column headers (Barcode, Product Name, Price).'
+            )
+        );
+        return;
+      }
+      setExcelPreview(parsed);
+    } catch {
+      setExcelPreview(null);
+      setStatusMsg(
+        tx(
+          'ไม่สามารถอ่านไฟล์นี้ได้ กรุณาใช้ไฟล์ .xlsx, .xls หรือ .csv ค่ะ',
+          'Could not read this file. Please upload a .xlsx, .xls, or .csv file.'
+        )
+      );
+    }
+  };
+
+  const handleConfirmExcelImport = () => {
+    if (!excelPreview || excelPreview.items.length === 0) return;
+    playSoftClick();
+    const { nextItems, addedCount, updatedCount } = mergeImportedMenuItems(
+      menuItems,
+      excelPreview.items,
+      importMode
+    );
+    onChangeMenuItems(nextItems);
+    setExcelPreview(null);
+    setStatusMsg(
+      importMode === 'replace'
+        ? tx(
+            `นำเข้าและแทนที่สินค้าทั้งหมด ${addedCount} รายการเรียบร้อยแล้วค่ะ (พร้อมยิงบาร์โค้ดทันที!)`,
+            `Imported and replaced catalog with ${addedCount} items (ready for barcode scan!).`
+          )
+        : tx(
+            `นำเข้าข้อมูลสำเร็จ! เพิ่มใหม่ ${addedCount} รายการ, อัปเดต ${updatedCount} รายการ (รวม ${nextItems.length} รายการ)`,
+            `Import complete! Added ${addedCount}, updated ${updatedCount} (Total: ${nextItems.length} items).`
+          )
+    );
+  };
+
+  const handleAddSingleProduct = (e: React.FormEvent) => {
+    e.preventDefault();
+    playSoftClick();
+    const name = newProdName.trim();
+    const price = Number(newProdPrice);
+    if (!name || Number.isNaN(price) || price < 0) {
+      setStatusMsg(tx('กรุณากรอกชื่อสินค้าและราคาให้ถูกต้องค่ะ', 'Please enter a valid product name and price.'));
+      return;
+    }
+    const stars = Math.max(0, parseInt(newProdStars, 10) || 1);
+    const barcode = newProdBarcode.trim();
+    const newItem: MenuItem = {
+      id: `manual_${Date.now()}`,
+      barcode,
+      name,
+      price,
+      stars,
+      category: newProdCategory.trim() || 'สินค้าทั่วไป',
+      imageUrl: newProdImageUrl || undefined,
+      status: 'พร้อมขาย',
+    };
+    const { nextItems, updatedCount } = mergeImportedMenuItems(menuItems, [newItem], 'merge');
+    onChangeMenuItems(nextItems);
+    setNewProdBarcode('');
+    setNewProdName('');
+    setNewProdPrice('');
+    setNewProdStars('2');
+    setNewProdImageUrl('');
+    setStatusMsg(
+      updatedCount > 0
+        ? tx(`อัปเดตสินค้า "${name}" เรียบร้อยแล้วค่ะ`, `Updated product "${name}".`)
+        : tx(`เพิ่มสินค้า "${name}" เข้าระบบเรียบร้อยแล้วค่ะ`, `Added product "${name}" to catalog.`)
+    );
+  };
+
+  const handleNewProductImageSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    playSoftClick();
+    try {
+      const compressed = await compressProductImageFile(file);
+      setNewProdImageUrl(compressed);
+      setStatusMsg(tx('อัปโหลดรูปภาพสินค้าพร้อมบันทึกแล้วค่ะ', 'Product photo uploaded and ready to save!'));
+    } catch {
+      setStatusMsg(
+        tx('ไม่สามารถอ่านไฟล์รูปภาพนี้ได้ กรุณาเลือกไฟล์ JPG หรือ PNG ค่ะ', 'Could not read image file. Please choose JPG or PNG.')
+      );
+    }
+  };
+
+  const handleExistingProductImageSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    const targetId = editingImageItemId;
+    setEditingImageItemId(null);
+    if (!file || !targetId) return;
+    playSoftClick();
+    try {
+      const compressed = await compressProductImageFile(file);
+      const target = menuItems.find((m) => m.id === targetId);
+      onChangeMenuItems(
+        menuItems.map((m) => (m.id === targetId ? { ...m, imageUrl: compressed } : m))
+      );
+      setStatusMsg(
+        tx(
+          `อัปโหลดรูปภาพ "${target?.name || 'สินค้า'}" เรียบร้อยแล้วค่ะ`,
+          `Updated photo for "${target?.name || 'product'}"!`
+        )
+      );
+    } catch {
+      setStatusMsg(
+        tx('ไม่สามารถอ่านไฟล์รูปภาพนี้ได้ กรุณาเลือกไฟล์ JPG หรือ PNG ค่ะ', 'Could not read image file. Please choose JPG or PNG.')
+      );
+    }
+  };
+
+  const handleClearProductImage = (id: string) => {
+    playSoftClick();
+    onChangeMenuItems(menuItems.map((m) => (m.id === id ? { ...m, imageUrl: undefined } : m)));
+  };
+
+  const handleToggleProductStatus = (id: string) => {
+    playSoftClick();
+    onChangeMenuItems(
+      menuItems.map((m) =>
+        m.id === id ? { ...m, status: m.status === 'พร้อมขาย' ? 'หมด' : 'พร้อมขาย' } : m
+      )
+    );
+  };
+
+  const handleDeleteProduct = (id: string) => {
+    playSoftClick();
+    onChangeMenuItems(menuItems.filter((m) => m.id !== id));
+  };
+
+  const handlePushMenuToSheets = async () => {
+    playSoftClick();
+    if (!scriptUrl.trim()) {
+      setStatusMsg(
+        tx(
+          'กรุณาใส่ลิงก์ Google Apps Script URL ในแท็บ "Google Sheets หลังบ้าน" ก่อนนะคะ',
+          'Please enter your Google Apps Script URL in the "Google Sheets" tab first.'
+        )
+      );
+      return;
+    }
+    setSyncing(true);
+    const res = await postToSheets(scriptUrl, 'ตั้งค่าเมนู', {
+      menu: menuItems,
+    });
+    setSyncing(false);
+    setStatusMsg(
+      res.sent
+        ? tx(
+            `ส่งรายการสินค้า ${menuItems.length} รายการขึ้นแท็บ "ตั้งค่าเมนู" ใน Google Sheets เรียบร้อยค่ะ`,
+            `Pushed ${menuItems.length} products to Google Sheets.`
+          )
+        : tx(
+            'บันทึกเข้าคิวออฟไลน์แล้ว ระบบจะส่งขึ้น Google Sheets เมื่อต่อเน็ตค่ะ',
+            'Saved to offline queue; will sync once back online.'
+          )
+    );
+  };
+
+  const handleAddRewardOffer = (e: React.FormEvent) => {
+    e.preventDefault();
+    playSoftClick();
+    if (!newRewardTitle.trim()) return;
+    const next: RewardOffer[] = [
+      ...rewardOffers,
+      {
+        id: `rw_${Date.now()}`,
+        title: newRewardTitle.trim(),
+        starsRequired: Math.max(1, parseInt(newRewardStars, 10) || 50),
+        description: newRewardDesc.trim(),
+        terms: newRewardTerms.trim(),
+        expiryDate: newRewardExpiry.trim() || 'ไม่มีกำหนด',
+        active: true,
+      },
+    ];
+    onChangeRewardOffers(next);
+    setNewRewardTitle('');
+    setNewRewardStars('50');
+    setNewRewardDesc('');
+    setNewRewardTerms('');
+    setStatusMsg(tx('เพิ่มข้อเสนอของรางวัลแลกดาวเรียบร้อยแล้วค่ะ', 'Star reward offer added!'));
+  };
+
+  const handleUpdateRewardOffer = (
+    id: string,
+    field: keyof RewardOffer,
+    value: string | number | boolean
+  ) => {
+    onChangeRewardOffers(
+      rewardOffers.map((r) => (r.id === id ? { ...r, [field]: value } : r))
+    );
+  };
+
+  const handleDeleteRewardOffer = (id: string) => {
+    playSoftClick();
+    onChangeRewardOffers(rewardOffers.filter((r) => r.id !== id));
+  };
+
+  const handlePushRewardsToSheets = async () => {
+    playSoftClick();
+    if (!scriptUrl.trim()) {
+      setStatusMsg(
+        tx(
+          'กรุณาใส่ลิงก์ Google Apps Script URL ในแท็บ "Google Sheets หลังบ้าน" ก่อนนะคะ',
+          'Please enter your Google Apps Script URL in the "Google Sheets" tab first.'
+        )
+      );
+      return;
+    }
+    setSyncing(true);
+    const res = await postToSheets(scriptUrl, 'โปรโมชันแลกดาว', {
+      rewardOffers,
+    });
+    setSyncing(false);
+    setStatusMsg(
+      res.sent
+        ? tx(
+            'บันทึกข้อเสนอแลกดาวขึ้นแท็บ "โปรโมชันแลกดาว" ใน Google Sheets แล้วค่ะ',
+            'Saved star reward offers to Google Sheets.'
+          )
+        : tx(
+            'บันทึกเข้าคิวออฟไลน์แล้ว ระบบจะส่งขึ้น Google Sheets เมื่อต่อเน็ตค่ะ',
+            'Saved to offline queue; will sync once back online.'
+          )
+    );
+  };
+
+  const handlePushAllToSheets = async () => {
+    playSoftClick();
+    if (!scriptUrl.trim()) {
+      setStatusMsg(
+        tx(
+          'กรุณาใส่ลิงก์ Google Apps Script URL ก่อนนะคะ',
+          'Please enter your Google Apps Script URL first.'
+        )
+      );
+      return;
+    }
+    setSyncing(true);
+    const staffList = Object.entries(staffUsers).map(([pin, u]) => ({
+      pin,
+      name: u.name,
+      role: u.role,
+    }));
+    const r1 = await postToSheets(scriptUrl, 'ตั้งค่าระบบ', {
+      settings: {
+        orgCode,
+        shopNameTh,
+        shopNameEn,
+        foodShopNameTh,
+        foodShopNameEn,
+        promptPayId,
+        promptPayAccountName,
+        rewardNotice,
+        promoTitle,
+        promoSubtitle,
+        onlineOrderEnabled: String(onlineOrderEnabled),
+        enableAutoPaymentCheck: String(enableAutoPaymentCheck),
+      },
+    });
+    const r2 = await postToSheets(scriptUrl, 'ตั้งค่าเมนู', { menu: menuItems });
+    const r3 = await postToSheets(scriptUrl, 'ถามตอบลูกค้า', { faqs });
+    const r4 = await postToSheets(scriptUrl, 'โปรโมชันแลกดาว', { rewardOffers });
+    const r5 = await postToSheets(scriptUrl, 'ผู้ใช้งานและPIN', { staffList });
+    setSyncing(false);
+
+    if (r1.sent && r2.sent && r3.sent && r4.sent && r5.sent) {
+      setStatusMsg(
+        tx(
+          'สร้างแท็บและส่งข้อมูล (ตั้งค่าระบบ, เมนู, พนักงาน/PIN, ถาม-ตอบ, แลกดาว) ขึ้น Google Sheets เรียบร้อยแล้วค่ะ!',
+          'Successfully initialized tabs & pushed settings, menu, staff PINs, FAQs, and rewards to Google Sheets!'
+        )
+      );
+    } else {
+      setStatusMsg(
+        tx(
+          'บันทึกบางส่วนเข้าคิวออฟไลน์แล้ว กรุณาตรวจสอบอินเทอร์เน็ตและลองอีกครั้งค่ะ',
+          'Some items were queued offline. Please check your connection and try again.'
+        )
+      );
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-sm p-3 sm:p-4">
+      <div
+        className="w-full max-w-3xl max-h-[92vh] rounded-3xl border shadow-xl flex flex-col overflow-hidden"
+        style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+      >
+        {/* Modal Header */}
+        <div
+          className="flex items-center justify-between px-5 sm:px-6 py-4 border-b shrink-0"
+          style={{ borderColor: 'var(--border-soft)' }}
+        >
+          <div>
+            <h2 className="text-xl font-bold" style={{ color: 'var(--text-main)' }}>
+              {tx('⚙️ ตั้งค่าร้าน & สรุปยอด (เฉพาะผู้ดูแลร้าน)', '⚙️ Shop Settings & Reports (Admin Only)')}
+            </h2>
+            <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+              {tx(
+                `รหัสร้านค้า: ${orgCode} · ซ่อนจากหน้าลูกค้าสั่งซื้อเอง`,
+                `Store ID: ${orgCode} · Hidden from Customer self-order screens`
+              )}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="w-11 h-11 rounded-2xl border flex items-center justify-center cursor-pointer"
+            style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+            aria-label={tx('ปิดหน้าต่าง', 'Close settings')}
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Navigation Tabs */}
+        <div
+          className="flex gap-2 px-5 sm:px-6 py-3 border-b shrink-0 overflow-x-auto"
+          style={{ backgroundColor: 'var(--bg-subtle)', borderColor: 'var(--border-soft)' }}
+        >
+          {[
+            { id: 'general', label: tx('ธีม & โหมดร้าน', 'Themes & Mode'), icon: Palette },
+            { id: 'products', label: tx('สินค้าบาร์โค้ด (Excel)', 'Products & Excel'), icon: Barcode },
+            { id: 'summary', label: tx('สรุปยอด / LINE / Excel', 'Summary / LINE / Excel'), icon: FileSpreadsheet },
+            { id: 'faq', label: tx('โปรโมชัน / แลกดาว / FAQ', 'Promos / Rewards / FAQ'), icon: MessageCircleQuestion },
+            { id: 'sheets', label: tx('Google Sheets หลังบ้าน', 'Google Sheets'), icon: Database },
+          ].map((tab) => {
+            const Icon = tab.icon;
+            const active = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => {
+                  playSoftClick();
+                  setActiveTab(tab.id as AdminSettingsTab);
+                }}
+                className="px-4 py-2 rounded-2xl text-xs sm:text-sm font-semibold flex items-center gap-2 cursor-pointer whitespace-nowrap shrink-0"
+                style={{
+                  backgroundColor: active ? 'var(--accent-primary)' : 'var(--bg-card)',
+                  color: active ? '#FFFFFF' : 'var(--text-main)',
+                }}
+              >
+                <Icon className="w-4 h-4" />
+                {tab.label}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Scrollable Content */}
+        <div className="p-5 sm:p-6 overflow-y-auto space-y-6 flex-1">
+          {statusMsg && (
+            <div
+              className="rounded-2xl px-4 py-3 text-sm font-semibold text-center"
+              style={{ backgroundColor: 'var(--accent-soft)', color: 'var(--accent-text)' }}
+            >
+              {statusMsg}
+            </div>
+          )}
+
+          {/* ================= TAB 1: THEME & STORE SETTINGS ================= */}
+          {activeTab === 'general' && (
+            <div className="space-y-6">
+              {/* Real vs Test Mode Segmented Switch */}
+              <div className="space-y-2.5">
+                <h3 className="text-base font-bold" style={{ color: 'var(--text-main)' }}>
+                  {tx(
+                    'โหมดการทำงานของระบบขาย (รีเซ็ตเป็นขายจริงอัตโนมัติทุกวันใหม่)',
+                    'POS Operating Mode (Auto-resets to Live Mode each new day)'
+                  )}
+                </h3>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSoftClick();
+                      onToggleTestMode(false);
+                    }}
+                    className="p-4 rounded-2xl border-2 text-left cursor-pointer transition-colors"
+                    style={{
+                      backgroundColor: !isTestMode ? 'var(--accent-soft)' : 'var(--bg-canvas)',
+                      borderColor: !isTestMode ? '#16A34A' : 'var(--border-soft)',
+                    }}
+                  >
+                    <p className="font-bold text-sm sm:text-base text-emerald-800">
+                      {tx('🟢 โหมดขายจริง', '🟢 Live Sales Mode')}
+                    </p>
+                    <p className="text-xs text-emerald-700 mt-0.5">
+                      {tx(
+                        'ส่งลง "ขายจริง_หน้าร้าน" / "ขายจริง_ครัวแม่วัง"',
+                        'Syncs to live Storefront & Krua Mae Wang tabs'
+                      )}
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSoftClick();
+                      onToggleTestMode(true);
+                    }}
+                    className="p-4 rounded-2xl border-2 text-left cursor-pointer transition-colors"
+                    style={{
+                      backgroundColor: isTestMode ? '#FFEDD5' : 'var(--bg-canvas)',
+                      borderColor: isTestMode ? '#EA580C' : 'var(--border-soft)',
+                    }}
+                  >
+                    <p className="font-bold text-sm sm:text-base text-orange-800">
+                      {tx('🟠 โหมดทดสอบระบบ', '🟠 System Test Mode')}
+                    </p>
+                    <p className="text-xs text-orange-700 mt-0.5">
+                      {tx(
+                        'ส่งแยกเข้าแท็บ "ทดสอบระบบ" ไม่ปนยอดจริง',
+                        'Syncs separately to the "Test" tab only'
+                      )}
+                    </p>
+                  </button>
+                </div>
+              </div>
+
+              {/* 4 Eye-Friendly Themes */}
+              <div className="space-y-2.5">
+                <h3 className="text-base font-bold" style={{ color: 'var(--text-main)' }}>
+                  {tx('เลือกโทนสีสบายตา (4 โทน)', 'Choose Comfort Color Theme (4 Themes)')}
+                </h3>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {THEME_OPTIONS.map((t) => {
+                    const selected = themeId === t.id;
+                    const themeDisplay = translateThemeOption(t.id, t.name, t.description, lang);
+                    return (
+                      <button
+                        key={t.id}
+                        type="button"
+                        onClick={() => {
+                          playSoftClick();
+                          onChangeTheme(t.id);
+                        }}
+                        className="p-3.5 rounded-2xl border-2 text-left flex items-center gap-3 cursor-pointer transition-transform active:scale-[0.99]"
+                        style={{
+                          backgroundColor: t.previewBg,
+                          borderColor: selected ? t.previewAccent : 'var(--border-soft)',
+                        }}
+                      >
+                        <span
+                          className="w-9 h-9 rounded-xl shrink-0 flex items-center justify-center text-white"
+                          style={{ backgroundColor: t.previewAccent }}
+                        >
+                          {selected && <Check className="w-5 h-5" />}
+                        </span>
+                        <div className="min-w-0">
+                          <p className="text-sm font-bold text-[#2F2620]">{themeDisplay.name}</p>
+                          <p className="text-xs text-[#6B5E53] truncate">{themeDisplay.description}</p>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Operation Switches */}
+              <div className="space-y-3">
+                <label
+                  className="flex items-center justify-between gap-4 p-4 rounded-2xl border cursor-pointer"
+                  style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                >
+                  <div>
+                    <p className="font-bold text-sm" style={{ color: 'var(--text-main)' }}>
+                      {tx('เปิดรับออเดอร์ออนไลน์ / สั่งเมนูหน้าร้าน', 'Accept Self-Orders & Online Menu Orders')}
+                    </p>
+                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                      {tx(
+                        'ปิดชั่วคราวได้เมื่อของหมดหรือหน้าร้านยุ่งมาก',
+                        'Temporarily pause when items sell out or during rush hours'
+                      )}
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={onlineOrderEnabled}
+                    onChange={(e) => onToggleOnlineOrder(e.target.checked)}
+                    className="w-6 h-6 accent-emerald-600 cursor-pointer"
+                  />
+                </label>
+
+                <label
+                  className="flex items-center justify-between gap-4 p-4 rounded-2xl border cursor-pointer"
+                  style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                >
+                  <div>
+                    <p className="font-bold text-sm" style={{ color: 'var(--text-main)' }}>
+                      {tx('เช็กยอดเงินเข้าอัตโนมัติทุก 3 วินาที', 'Auto-Check QR Payment Every 3 Seconds')}
+                    </p>
+                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                      {tx(
+                        'ค่าเริ่มต้นปิดไว้ (รอฟังเสียงจากลำโพงธนาคารแล้วกดยืนยันเอง)',
+                        'Off by default (listen for bank alert and tap Confirm manually)'
+                      )}
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={enableAutoPaymentCheck}
+                    onChange={(e) => onToggleAutoPaymentCheck(e.target.checked)}
+                    className="w-6 h-6 accent-emerald-600 cursor-pointer"
+                  />
+                </label>
+              </div>
+
+              {/* Shop Names & PromptPay */}
+              <div className="space-y-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-semibold mb-1">
+                      {tx('ชื่อหน้าร้านหลัก (ไทย)', 'Main Shop Name (Thai)')}
+                    </label>
+                    <input
+                      type="text"
+                      value={shopNameTh}
+                      onChange={(e) => onChangeShopNameTh(e.target.value)}
+                      className="w-full h-11 px-3.5 rounded-2xl border text-sm"
+                      style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-1">
+                      {tx('ชื่อหน้าร้านหลัก (อังกฤษ)', 'Main Shop Name (English)')}
+                    </label>
+                    <input
+                      type="text"
+                      value={shopNameEn}
+                      onChange={(e) => onChangeShopNameEn(e.target.value)}
+                      className="w-full h-11 px-3.5 rounded-2xl border text-sm font-en"
+                      style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-1">
+                      {tx('ชื่อร้านอาหาร (ไทย)', 'Kitchen Shop Name (Thai)')}
+                    </label>
+                    <input
+                      type="text"
+                      value={foodShopNameTh}
+                      onChange={(e) => onChangeFoodShopNameTh(e.target.value)}
+                      className="w-full h-11 px-3.5 rounded-2xl border text-sm"
+                      style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-1">
+                      {tx('ชื่อร้านอาหาร (อังกฤษ)', 'Kitchen Shop Name (English)')}
+                    </label>
+                    <input
+                      type="text"
+                      value={foodShopNameEn}
+                      onChange={(e) => onChangeFoodShopNameEn(e.target.value)}
+                      className="w-full h-11 px-3.5 rounded-2xl border text-sm font-en"
+                      style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-semibold mb-1">
+                      {tx('เบอร์พร้อมเพย์รับเงิน (PromptPay ID)', 'PromptPay Receiver ID')}
+                    </label>
+                    <input
+                      type="text"
+                      value={promptPayId}
+                      onChange={(e) => onChangePromptPayId(e.target.value)}
+                      placeholder={tx('เช่น 0837596411', 'e.g. 0837596411')}
+                      className="w-full h-11 px-3.5 rounded-2xl border font-num"
+                      style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold mb-1">
+                      {tx('ชื่อบัญชีพร้อมเพย์', 'PromptPay Account Name')}
+                    </label>
+                    <input
+                      type="text"
+                      value={promptPayAccountName}
+                      onChange={(e) => onChangePromptPayAccountName(e.target.value)}
+                      placeholder={tx('เช่น คำวัง พวงมาลา', 'e.g. คำวัง พวงมาลา')}
+                      className="w-full h-11 px-3.5 rounded-2xl border text-sm"
+                      style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                    />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================= TAB 2: EXCEL BARCODE PRODUCT IMPORTER & CATALOG ================= */}
+          {activeTab === 'products' && (
+            <div className="space-y-6">
+              {/* Step 1: Import Excel Box */}
+              <div
+                className="rounded-2xl border p-4 sm:p-5 space-y-4"
+                style={{ backgroundColor: 'var(--accent-soft)', borderColor: 'var(--accent-border)' }}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-base font-bold" style={{ color: 'var(--accent-text)' }}>
+                      {tx('📥 ดึงไฟล์ Excel ข้อมูลสินค้า & บาร์โค้ดเข้าระบบ', '📥 Import Excel Product & Barcode Catalog')}
+                    </h3>
+                    <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                      {tx('รองรับไฟล์', 'Supports')}{' '}
+                      <span className="font-en font-semibold">.xlsx, .xls, .csv</span>{' '}
+                      {tx(
+                        '(คอลัมน์: เลขบาร์โค้ด, ชื่อสินค้า, ราคา, จำนวนดาว, หมวดหมู่, สถานะ)',
+                        '(Columns: Barcode, Product Name, Price, Stars, Category, Status)'
+                      )}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playSoftClick();
+                        downloadProductExcelXlsx(menuItems, true);
+                        setStatusMsg(
+                          tx(
+                            'ดาวน์โหลดไฟล์ต้นแบบ Excel เรียบร้อยแล้วค่ะ',
+                            'Sample Excel template downloaded!'
+                          )
+                        );
+                      }}
+                      className="px-3.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                      style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      {tx('โหลดไฟล์ต้นแบบ Excel', 'Download Template')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playSoftClick();
+                        downloadProductExcelXlsx(menuItems, false);
+                        setStatusMsg(
+                          tx(
+                            `ส่งออกสินค้าปัจจุบัน ${menuItems.length} รายการเป็นไฟล์ Excel แล้วค่ะ`,
+                            `Exported ${menuItems.length} current products to Excel.`
+                          )
+                        );
+                      }}
+                      className="px-3.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                      style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" />
+                      {tx(`ส่งออกสินค้าที่มี (${menuItems.length})`, `Export Current (${menuItems.length})`)}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Hidden File Input + Friendly Big Upload Button */}
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  onChange={handleExcelFileSelected}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    playSoftClick();
+                    fileInputRef.current?.click();
+                  }}
+                  className="w-full h-14 px-5 rounded-2xl font-bold text-sm sm:text-base text-white flex items-center justify-center gap-2.5 shadow-sm cursor-pointer transition-transform active:scale-[0.99]"
+                  style={{ backgroundColor: 'var(--accent-primary)' }}
+                >
+                  <Upload className="w-5 h-5" />
+                  {tx('เลือกไฟล์ Excel / CSV สินค้าบาร์โค้ดจากเครื่อง', 'Choose Excel / CSV Barcode File')}
+                </button>
+
+                {/* Preview & Confirm Panel */}
+                {excelPreview && (
+                  <div
+                    className="rounded-2xl border-2 p-4 space-y-3"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--accent-primary)' }}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <p className="font-bold text-sm" style={{ color: 'var(--accent-text)' }}>
+                        {tx(
+                          `ตรวจพบสินค้าทั้งหมด ${excelPreview.items.length} รายการ (ชีต: ${excelPreview.sheetName})`,
+                          `Detected ${excelPreview.items.length} items (Sheet: ${excelPreview.sheetName})`
+                        )}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setExcelPreview(null)}
+                        className="text-xs font-semibold px-2.5 py-1 rounded-lg border cursor-pointer"
+                        style={{ borderColor: 'var(--border-soft)' }}
+                      >
+                        {tx('ยกเลิกไฟล์นี้', 'Cancel File')}
+                      </button>
+                    </div>
+
+                    {excelPreview.warnings.length > 0 && (
+                      <div
+                        className="rounded-xl px-3 py-2 text-xs space-y-0.5"
+                        style={{ backgroundColor: 'var(--pastel-peach)', color: 'var(--pastel-peach-text)' }}
+                      >
+                        {excelPreview.warnings.map((w, idx) => (
+                          <p key={idx}>• {w}</p>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Import Mode Choice */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setImportMode('merge')}
+                        className="p-3 rounded-xl border-2 text-left text-xs cursor-pointer"
+                        style={{
+                          backgroundColor: importMode === 'merge' ? 'var(--accent-soft)' : 'var(--bg-canvas)',
+                          borderColor: importMode === 'merge' ? 'var(--accent-primary)' : 'var(--border-soft)',
+                        }}
+                      >
+                        <p className="font-bold text-sm">
+                          {tx('🔄 เพิ่มใหม่ + อัปเดตสินค้าเดิม (แนะนำ)', '🔄 Merge & Update Existing (Recommended)')}
+                        </p>
+                        <p style={{ color: 'var(--text-muted)' }}>
+                          {tx(
+                            'บาร์โค้ดเดิมจะอัปเดตราคา/ชื่อใหม่ ส่วนบาร์โค้ดใหม่จะเพิ่มต่อท้าย',
+                            'Updates matching barcodes and appends new items'
+                          )}
+                        </p>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setImportMode('replace')}
+                        className="p-3 rounded-xl border-2 text-left text-xs cursor-pointer"
+                        style={{
+                          backgroundColor: importMode === 'replace' ? '#FFEDD5' : 'var(--bg-canvas)',
+                          borderColor: importMode === 'replace' ? '#EA580C' : 'var(--border-soft)',
+                        }}
+                      >
+                        <p className="font-bold text-sm text-orange-900">
+                          {tx('♻️ แทนที่รายการสินค้าเดิมทั้งหมด', '♻️ Replace Entire Catalog')}
+                        </p>
+                        <p className="text-orange-700">
+                          {tx(
+                            'ล้างรายการเก่าแล้วใช้เฉพาะรายการจากไฟล์ Excel นี้',
+                            'Clears old catalog and keeps only items from this file'
+                          )}
+                        </p>
+                      </button>
+                    </div>
+
+                    {/* Preview Table */}
+                    <div className="max-h-48 overflow-auto rounded-xl border" style={{ borderColor: 'var(--border-soft)' }}>
+                      <table className="w-full text-xs text-left">
+                        <thead style={{ backgroundColor: 'var(--bg-subtle)' }}>
+                          <tr>
+                            <th className="p-2 font-bold">{tx('บาร์โค้ด', 'Barcode')}</th>
+                            <th className="p-2 font-bold">{tx('ชื่อสินค้า', 'Product Name')}</th>
+                            <th className="p-2 font-bold">{tx('ราคา', 'Price')}</th>
+                            <th className="p-2 font-bold">{tx('ดาว', 'Stars')}</th>
+                            <th className="p-2 font-bold">{tx('หมวดหมู่', 'Category')}</th>
+                            <th className="p-2 font-bold">{tx('สถานะ', 'Status')}</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y" style={{ borderColor: 'var(--border-soft)' }}>
+                          {excelPreview.items.slice(0, 30).map((item, idx) => (
+                            <tr key={idx}>
+                              <td className="p-2 font-mono">{item.barcode || '-'}</td>
+                              <td className="p-2 font-semibold">{translateMenuName(item.name, lang)}</td>
+                              <td className="p-2 font-num">฿{item.price}</td>
+                              <td className="p-2 font-num">⭐{item.stars}</td>
+                              <td className="p-2">{translateCategory(item.category, lang)}</td>
+                              <td className="p-2">{translateStatus(item.status, lang)}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {excelPreview.items.length > 30 && (
+                        <p className="text-center text-xs py-1.5" style={{ color: 'var(--text-muted)' }}>
+                          {tx(
+                            `... และอีก ${excelPreview.items.length - 30} รายการ`,
+                            `... and ${excelPreview.items.length - 30} more items`
+                          )}
+                        </p>
+                      )}
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleConfirmExcelImport}
+                      className="w-full h-12 rounded-2xl font-bold text-sm text-white flex items-center justify-center gap-2 cursor-pointer"
+                      style={{ backgroundColor: '#16A34A' }}
+                    >
+                      <Check className="w-5 h-5" />
+                      {tx(
+                        `ยืนยันนำเข้าข้อมูล (${excelPreview.items.length} รายการ)`,
+                        `Confirm Import (${excelPreview.items.length} items)`
+                      )}
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Step 2: Quick Add Single Product + Mobile/PC Photo Upload */}
+              <form
+                onSubmit={handleAddSingleProduct}
+                className="rounded-2xl border p-4 space-y-3"
+                style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="font-bold text-sm">
+                    {tx('+ เพิ่มสินค้าใหม่ทีละรายการ (อัปโหลดรูปจากมือถือ/คอมได้)', '+ Add Single Product (Upload Photo from Mobile/PC)')}
+                  </h4>
+                </div>
+
+                <input
+                  ref={newProdImageInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleNewProductImageSelected}
+                  className="hidden"
+                />
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSoftClick();
+                      newProdImageInputRef.current?.click();
+                    }}
+                    className="w-16 h-16 rounded-2xl border-2 border-dashed overflow-hidden flex flex-col items-center justify-center gap-0.5 shrink-0 cursor-pointer transition-transform active:scale-95"
+                    style={{
+                      backgroundColor: 'var(--bg-card)',
+                      borderColor: newProdImageUrl ? 'var(--accent-primary)' : 'var(--border-soft)',
+                      color: 'var(--accent-text)',
+                    }}
+                    title={tx('เลือกรูปหรือถ่ายรูปสินค้า', 'Choose or capture product photo')}
+                  >
+                    {newProdImageUrl ? (
+                      <img src={newProdImageUrl} alt="Preview" className="w-full h-full object-cover" />
+                    ) : (
+                      <>
+                        <ImagePlus className="w-5 h-5" />
+                        <span className="text-[10px] font-bold">{tx('ใส่รูป', 'Photo')}</span>
+                      </>
+                    )}
+                  </button>
+
+                  <div className="flex-1 min-w-[200px] space-y-1.5">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          playSoftClick();
+                          newProdImageInputRef.current?.click();
+                        }}
+                        className="px-3.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                        style={{
+                          backgroundColor: 'var(--pastel-blue)',
+                          borderColor: 'var(--border-soft)',
+                          color: 'var(--pastel-blue-text)',
+                        }}
+                      >
+                        <Camera className="w-4 h-4" />
+                        {newProdImageUrl
+                          ? tx('เปลี่ยนรูปภาพสินค้า', 'Change Product Photo')
+                          : tx('อัปโหลด / ถ่ายรูปสินค้า', 'Upload / Take Product Photo')}
+                      </button>
+                      {newProdImageUrl && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playSoftClick();
+                            setNewProdImageUrl('');
+                          }}
+                          className="px-2.5 py-2 rounded-xl text-xs font-bold cursor-pointer"
+                          style={{
+                            backgroundColor: 'var(--pastel-pink)',
+                            color: 'var(--pastel-pink-text)',
+                          }}
+                        >
+                          {tx('ลบรูป', 'Remove')}
+                        </button>
+                      )}
+                    </div>
+                    <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                      {tx(
+                        'เลือกภาพจากมือถือ กล้องถ่ายรูป หรือคอมพิวเตอร์ ระบบย่อขนาดให้อัตโนมัติค่ะ',
+                        'Choose from mobile gallery, camera, or computer (auto-compressed).'
+                      )}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
+                  <input
+                    type="text"
+                    value={newProdBarcode}
+                    onChange={(e) => setNewProdBarcode(e.target.value)}
+                    placeholder={tx('เลขบาร์โค้ด (ไม่บังคับ)', 'Barcode (optional)')}
+                    className="sm:col-span-4 h-10 px-3 rounded-xl border text-xs font-mono"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                  />
+                  <input
+                    type="text"
+                    value={newProdName}
+                    onChange={(e) => setNewProdName(e.target.value)}
+                    placeholder={tx('ชื่อสินค้า/เมนูอาหาร *', 'Product / Dish Name *')}
+                    className="sm:col-span-4 h-10 px-3 rounded-xl border text-xs"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.5"
+                    value={newProdPrice}
+                    onChange={(e) => setNewProdPrice(e.target.value)}
+                    placeholder={tx('ราคา (บาท) *', 'Price (฿) *')}
+                    className="sm:col-span-2 h-10 px-3 rounded-xl border text-xs font-num"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                  />
+                  <input
+                    type="number"
+                    min="0"
+                    value={newProdStars}
+                    onChange={(e) => setNewProdStars(e.target.value)}
+                    placeholder={tx('ดาว', 'Stars')}
+                    className="sm:col-span-2 h-10 px-3 rounded-xl border text-xs font-num"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                  />
+                </div>
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <input
+                    type="text"
+                    value={newProdCategory}
+                    onChange={(e) => setNewProdCategory(e.target.value)}
+                    placeholder={tx(
+                      'หมวดหมู่ (เช่น อาหารจานเดียว, เครื่องดื่ม, สินค้าทั่วไป)',
+                      'Category (e.g. Rice & Noodles, Drinks, General)'
+                    )}
+                    className="flex-1 min-w-[200px] h-10 px-3 rounded-xl border text-xs"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                  />
+                  <button
+                    type="submit"
+                    className="px-4 h-10 rounded-xl font-bold text-xs text-white flex items-center gap-1.5 cursor-pointer"
+                    style={{ backgroundColor: 'var(--accent-primary)' }}
+                  >
+                    <Plus className="w-4 h-4" />
+                    {tx('เพิ่มสินค้า', 'Add Product')}
+                  </button>
+                </div>
+              </form>
+
+              {/* Hidden file input shared by all existing product cards for mobile/desktop photo upload */}
+              <input
+                ref={editProdImageInputRef}
+                type="file"
+                accept="image/*"
+                onChange={handleExistingProductImageSelected}
+                className="hidden"
+              />
+
+              {/* Step 3: Current Product List & Optional Push to Sheets */}
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="font-bold text-sm">
+                      {tx(
+                        `รายการสินค้าในระบบทั้งหมด (${menuItems.length} รายการ)`,
+                        `All Catalog Products (${menuItems.length} items)`
+                      )}
+                    </h4>
+                    <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                      {tx(
+                        'กดที่กรอบรูปด้านซ้ายของสินค้าแต่ละรายการเพื่ออัปโหลด/เปลี่ยนรูปภาพได้ทันทีค่ะ',
+                        'Tap the photo box on any item to upload or update its image'
+                      )}
+                    </p>
+                  </div>
+                  {scriptUrl.trim() && (
+                    <button
+                      type="button"
+                      disabled={syncing}
+                      onClick={handlePushMenuToSheets}
+                      className="px-3.5 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                      style={{
+                        backgroundColor: 'var(--pastel-blue)',
+                        borderColor: 'var(--border-soft)',
+                        color: 'var(--pastel-blue-text)',
+                      }}
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+                      {tx('ส่งรายการสินค้าขึ้น Google Sheets', 'Push Catalog to Google Sheets')}
+                    </button>
+                  )}
+                </div>
+
+                <div className="relative">
+                  <Search
+                    className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2"
+                    style={{ color: 'var(--text-muted)' }}
+                  />
+                  <input
+                    type="text"
+                    value={productSearch}
+                    onChange={(e) => setProductSearch(e.target.value)}
+                    placeholder={tx(
+                      'ค้นหาชื่อสินค้า, เลขบาร์โค้ด หรือหมวดหมู่...',
+                      'Search product name, barcode, or category...'
+                    )}
+                    className="w-full h-10 pl-10 pr-3 rounded-xl border text-xs sm:text-sm"
+                    style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                  />
+                </div>
+
+                <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
+                  {filteredProducts.length === 0 ? (
+                    <p className="text-xs text-center py-6" style={{ color: 'var(--text-muted)' }}>
+                      {tx('ไม่พบสินค้าที่ตรงกับคำค้นหาค่ะ', 'No matching products found.')}
+                    </p>
+                  ) : (
+                    filteredProducts.map((item) => (
+                      <div
+                        key={item.id}
+                        className="rounded-xl border p-2.5 sm:p-3 flex items-center justify-between gap-2.5"
+                        style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                      >
+                        {/* Tappable Thumbnail Photo Uploader (Mobile & Desktop) */}
+                        <div className="relative shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              playSoftClick();
+                              setEditingImageItemId(item.id);
+                              editProdImageInputRef.current?.click();
+                            }}
+                            title={tx('อัปโหลด / เปลี่ยนรูปภาพสินค้า', 'Upload / Change Product Image')}
+                            className="group relative w-13 h-13 rounded-xl border overflow-hidden flex flex-col items-center justify-center cursor-pointer transition-transform active:scale-95"
+                            style={{
+                              backgroundColor: 'var(--bg-card)',
+                              borderColor: item.imageUrl ? 'var(--accent-primary)' : 'var(--border-soft)',
+                              color: 'var(--accent-text)',
+                            }}
+                          >
+                            {item.imageUrl ? (
+                              <>
+                                <img
+                                  src={item.imageUrl}
+                                  alt={item.name}
+                                  className="w-full h-full object-cover"
+                                  referrerPolicy="no-referrer"
+                                />
+                                <span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                                  <Camera className="w-4 h-4" />
+                                </span>
+                              </>
+                            ) : (
+                              <>
+                                <Camera className="w-4 h-4" />
+                                <span className="text-[9px] font-bold leading-tight mt-0.5">
+                                  {tx('ใส่รูป', 'Photo')}
+                                </span>
+                              </>
+                            )}
+                          </button>
+                          {item.imageUrl && (
+                            <button
+                              type="button"
+                              onClick={() => handleClearProductImage(item.id)}
+                              aria-label={tx(`ลบรูป ${item.name}`, `Remove image for ${item.name}`)}
+                              className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-rose-600 text-white flex items-center justify-center shadow cursor-pointer"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-bold text-xs sm:text-sm truncate">
+                              {translateMenuName(item.name, lang)}
+                            </span>
+                            <span
+                              className="text-[11px] px-2 py-0.5 rounded-lg font-medium"
+                              style={{ backgroundColor: 'var(--bg-subtle)', color: 'var(--text-muted)' }}
+                            >
+                              {translateCategory(item.category, lang)}
+                            </span>
+                          </div>
+                          <p className="text-xs font-mono mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                            {tx('บาร์โค้ด:', 'Barcode:')} {item.barcode || tx('ไม่มี', 'None')} · ⭐ {item.stars}{' '}
+                            {tx('ดาว', 'stars')}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className="font-num font-bold text-sm">฿{item.price}</span>
+                          <button
+                            type="button"
+                            onClick={() => handleToggleProductStatus(item.id)}
+                            className="px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer"
+                            style={{
+                              backgroundColor:
+                                item.status === 'พร้อมขาย' ? 'var(--accent-soft)' : 'var(--pastel-pink)',
+                              color:
+                                item.status === 'พร้อมขาย'
+                                  ? 'var(--accent-text)'
+                                  : 'var(--pastel-pink-text)',
+                            }}
+                          >
+                            {translateStatus(item.status, lang)}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteProduct(item.id)}
+                            aria-label={tx(`ลบ ${item.name}`, `Delete ${item.name}`)}
+                            className="w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer"
+                            style={{
+                              backgroundColor: 'var(--pastel-pink)',
+                              color: 'var(--pastel-pink-text)',
+                            }}
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================= TAB 3: SUMMARY / LINE / EXCEL ================= */}
+          {activeTab === 'summary' && (
+            <div className="space-y-6">
+              {/* 2-Shop Daily Summary Cards */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-base font-bold">
+                    {tx(
+                      `สรุปยอดขายจริงวันนี้ (${lineSummary.todayDateLabel})`,
+                      `Today's Live Sales Summary (${lineSummary.todayDateLabel})`
+                    )}
+                  </h3>
+                  <span className="font-num font-bold text-lg" style={{ color: 'var(--accent-text)' }}>
+                    {tx('รวม', 'Total')} ฿{lineSummary.grandTotal.toLocaleString('th-TH')}
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {/* Store 1 */}
+                  <div
+                    className="rounded-2xl border p-4 space-y-1.5"
+                    style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                  >
+                    <p className="font-bold text-sm">
+                      ⭐ {lang === 'en' ? shopNameEn : shopNameTh} ({tx('หน้าร้าน', 'Storefront')})
+                    </p>
+                    <div className="text-xs space-y-1" style={{ color: 'var(--text-muted)' }}>
+                      <p>
+                        {tx('จำนวนบิล:', 'Bills:')}{' '}
+                        <span className="font-num font-bold text-[#2F2620]">
+                          {lineSummary.storeStats.bills} {tx('บิล', 'bills')}
+                        </span>
+                      </p>
+                      <p>
+                        {tx('เงินสด:', 'Cash:')}{' '}
+                        <span className="font-num font-bold text-[#2F2620]">
+                          ฿{lineSummary.storeStats.cash.toLocaleString('th-TH')}
+                        </span>
+                      </p>
+                      <p>
+                        {tx('สแกน QR:', 'QR Scan:')}{' '}
+                        <span className="font-num font-bold text-[#2F2620]">
+                          ฿{lineSummary.storeStats.qr.toLocaleString('th-TH')}
+                        </span>
+                      </p>
+                      <p>
+                        {tx('ยอดรวม:', 'Total:')}{' '}
+                        <span className="font-num font-bold text-emerald-700">
+                          ฿{lineSummary.storeStats.total.toLocaleString('th-TH')}
+                        </span>{' '}
+                        · ⭐ {lineSummary.storeStats.stars} {tx('ดาว', 'stars')}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Store 2 */}
+                  <div
+                    className="rounded-2xl border p-4 space-y-1.5"
+                    style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                  >
+                    <p className="font-bold text-sm">
+                      🍲 {lang === 'en' ? foodShopNameEn : foodShopNameTh} ({tx('ร้านข้าวแม่', "Mom's Kitchen")})
+                    </p>
+                    <div className="text-xs space-y-1" style={{ color: 'var(--text-muted)' }}>
+                      <p>
+                        {tx('จำนวนบิล:', 'Bills:')}{' '}
+                        <span className="font-num font-bold text-[#2F2620]">
+                          {lineSummary.kruaStats.bills} {tx('บิล', 'bills')}
+                        </span>
+                      </p>
+                      <p>
+                        {tx('เงินสด:', 'Cash:')}{' '}
+                        <span className="font-num font-bold text-[#2F2620]">
+                          ฿{lineSummary.kruaStats.cash.toLocaleString('th-TH')}
+                        </span>
+                      </p>
+                      <p>
+                        {tx('สแกน QR:', 'QR Scan:')}{' '}
+                        <span className="font-num font-bold text-[#2F2620]">
+                          ฿{lineSummary.kruaStats.qr.toLocaleString('th-TH')}
+                        </span>
+                      </p>
+                      <p>
+                        {tx('ยอดรวม:', 'Total:')}{' '}
+                        <span className="font-num font-bold text-emerald-700">
+                          ฿{lineSummary.kruaStats.total.toLocaleString('th-TH')}
+                        </span>{' '}
+                        · ⭐ {lineSummary.kruaStats.stars} {tx('ดาว', 'stars')}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* PromptPay Payment Reference Card */}
+                <div
+                  className="rounded-2xl border px-4 py-3 flex flex-wrap items-center justify-between gap-2 text-xs sm:text-sm"
+                  style={{ backgroundColor: 'var(--pastel-blue)', borderColor: 'var(--border-soft)', color: 'var(--pastel-blue-text)' }}
+                >
+                  <span className="font-bold">
+                    {tx('📱 ข้อมูลพร้อมเพย์รับชำระเงิน:', '📱 Store PromptPay Receiver:')}
+                  </span>
+                  <span className="font-semibold">
+                    <span className="font-num font-bold">{promptPayId}</span>
+                    {promptPayAccountName ? ` · ${tx('ชื่อบัญชี', 'Account')}: ${promptPayAccountName}` : ''}
+                  </span>
+                </div>
+              </div>
+
+              {/* LINE Share Box */}
+              <div
+                className="rounded-2xl border p-4 space-y-3"
+                style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h4 className="font-bold text-sm">
+                    {tx('💬 ส่งสรุปยอดเข้า LINE รายวัน', '💬 Share Daily Summary to LINE')}
+                  </h4>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCopyLineSummary}
+                      className="px-3.5 py-2 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                      style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                    >
+                      {copiedLine ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                      {copiedLine ? tx('คัดลอกแล้ว!', 'Copied!') : tx('คัดลอกข้อความ', 'Copy Text')}
+                    </button>
+                    <a
+                      href={lineShareUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-4 py-2 rounded-xl text-xs font-bold text-white flex items-center gap-1.5"
+                      style={{ backgroundColor: '#06C755' }}
+                    >
+                      <MessageCircle className="w-3.5 h-3.5" />
+                      {tx('💬 ส่งสรุปเข้า LINE', '💬 Send to LINE')}
+                    </a>
+                  </div>
+                </div>
+                <pre
+                  className="text-xs whitespace-pre-wrap p-3 rounded-xl border leading-relaxed"
+                  style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                >
+                  {lineSummary.text}
+                </pre>
+              </div>
+
+              {/* Excel Export Buttons */}
+              <div
+                className="rounded-2xl border p-4 space-y-3"
+                style={{ backgroundColor: 'var(--accent-soft)', borderColor: 'var(--accent-border)' }}
+              >
+                <div>
+                  <h4 className="font-bold text-sm" style={{ color: 'var(--accent-text)' }}>
+                    {tx(
+                      '📊 ส่งออกไฟล์ Excel (รองรับภาษาไทย 100% ไม่เพี้ยน)',
+                      '📊 Export Sales to Excel (UTF-8 Thai & English Ready)'
+                    )}
+                  </h4>
+                  <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                    {tx(
+                      'สร้างไฟล์ตารางแยกคอลัมน์ชัดเจน (วันที่, เลขบิล, ร้าน, โหมด, ผู้ขาย, ช่องทาง, ยอดเงิน, ดาว, รายการ)',
+                      'Clean table columns: Date, Bill ID, Shop, Mode, Seller, Method, Amount, Stars, Items'
+                    )}
+                  </p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSoftClick();
+                      const count = exportSalesToExcelCsv(saleLogs, 'today', shopNameTh, foodShopNameTh);
+                      setStatusMsg(
+                        tx(
+                          `ส่งออกไฟล์ Excel ยอดวันนี้ (${count} รายการ) เรียบร้อยแล้วค่ะ`,
+                          `Exported today's Excel report (${count} bills).`
+                        )
+                      );
+                    }}
+                    className="h-12 px-4 rounded-2xl font-bold text-sm text-white flex items-center justify-center gap-2 cursor-pointer"
+                    style={{ backgroundColor: 'var(--accent-primary)' }}
+                  >
+                    <Download className="w-4 h-4" />
+                    {tx('📊 ส่งออก Excel (ยอดวันนี้)', "📊 Export Excel (Today's Sales)")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSoftClick();
+                      const count = exportSalesToExcelCsv(saleLogs, 'all', shopNameTh, foodShopNameTh);
+                      setStatusMsg(
+                        tx(
+                          `ส่งออกไฟล์ Excel ประวัติทั้งหมด (${count} รายการ) เรียบร้อยแล้วค่ะ`,
+                          `Exported full sales history (${count} bills).`
+                        )
+                      );
+                    }}
+                    className="h-12 px-4 rounded-2xl border font-bold text-sm flex items-center justify-center gap-2 cursor-pointer"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--accent-border)', color: 'var(--accent-text)' }}
+                  >
+                    <FileSpreadsheet className="w-4 h-4" />
+                    {tx('📊 ส่งออก Excel (ประวัติทั้งหมด)', '📊 Export Excel (All History)')}
+                  </button>
+                </div>
+              </div>
+
+              {/* Recent Sales & Silent Void Logs */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <h4 className="text-sm font-bold">
+                    {tx(`ประวัติบิลล่าสุด (${saleLogs.length})`, `Recent Bills (${saleLogs.length})`)}
+                  </h4>
+                  {saleLogs.length === 0 ? (
+                    <p className="text-xs py-2" style={{ color: 'var(--text-muted)' }}>
+                      {tx('ยังไม่มีรายการขาย', 'No sales recorded yet')}
+                    </p>
+                  ) : (
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                      {saleLogs.slice(0, 15).map((s) => (
+                        <div
+                          key={s.id}
+                          className="rounded-xl border p-2.5 flex items-center justify-between gap-2 text-xs"
+                          style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                        >
+                          <div className="min-w-0">
+                            <p className="font-semibold truncate">[{s.mode}] {s.itemsSummary}</p>
+                            <p style={{ color: 'var(--text-muted)' }}>{s.timestamp} · {s.staffName}</p>
+                          </div>
+                          <span className="font-num font-bold shrink-0">฿{s.totalAmount}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <h4 className="text-sm font-bold flex items-center gap-1.5">
+                    <ShieldAlert className="w-4 h-4 text-rose-500" />
+                    {tx(`ประวัติยกเลิก (Silent Void: ${voidLogs.length})`, `Void History (Silent Void: ${voidLogs.length})`)}
+                  </h4>
+                  {voidLogs.length === 0 ? (
+                    <p className="text-xs py-2" style={{ color: 'var(--text-muted)' }}>
+                      {tx('ยังไม่มีการยกเลิก', 'No void actions recorded')}
+                    </p>
+                  ) : (
+                    <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                      {voidLogs.slice(0, 15).map((v) => (
+                        <div
+                          key={v.id}
+                          className="rounded-xl border p-2.5 flex items-center justify-between gap-2 text-xs"
+                          style={{ backgroundColor: 'var(--pastel-pink)', borderColor: 'var(--border-soft)' }}
+                        >
+                          <div className="min-w-0">
+                            <p className="font-semibold text-[#9A3B5E] truncate">{v.action}: {v.detail}</p>
+                            <p className="text-[#786B5E]">{v.timestamp} · {v.staffName}</p>
+                          </div>
+                          <span className="font-num font-bold text-[#9A3B5E] shrink-0">฿{v.amount}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================= TAB 4: PROMO AD & QUICK FAQ EDITOR ================= */}
+          {activeTab === 'faq' && (
+            <div className="space-y-6">
+              <div className="space-y-3">
+                <h3 className="text-base font-bold">
+                  {tx('ป้ายโฆษณาโปรโมชันหน้าแรกต้อนรับลูกค้า', 'Welcome Screen Promo Banner')}
+                </h3>
+                <div>
+                  <label className="block text-sm font-semibold mb-1">
+                    {tx('หัวข้อป้ายโฆษณา', 'Promo Headline')}
+                  </label>
+                  <input
+                    type="text"
+                    value={promoTitle}
+                    onChange={(e) => onChangePromoTitle(e.target.value)}
+                    className="w-full h-11 px-3.5 rounded-2xl border text-sm"
+                    style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold mb-1">
+                    {tx('รายละเอียดโปรโมชัน', 'Promo Subtitle / Description')}
+                  </label>
+                  <textarea
+                    rows={2}
+                    value={promoSubtitle}
+                    onChange={(e) => onChangePromoSubtitle(e.target.value)}
+                    className="w-full p-3 rounded-2xl border text-sm"
+                    style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold mb-1">
+                    {tx('แถบประกาศรางวัลสะสมดาว', 'Star Reward Announcement Bar')}
+                  </label>
+                  <input
+                    type="text"
+                    value={rewardNotice}
+                    onChange={(e) => onChangeRewardNotice(e.target.value)}
+                    className="w-full h-11 px-3.5 rounded-2xl border text-sm"
+                    style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                  />
+                </div>
+              </div>
+
+              {/* Reward Offers Editor */}
+              <div className="space-y-3 border-t pt-4" style={{ borderColor: 'var(--border-soft)' }}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-base font-bold flex items-center gap-1.5">
+                      <Gift className="w-4 h-4 text-amber-600" />
+                      {tx(
+                        'ข้อเสนอของรางวัลแลกดาว & วันหมดเขต (หน้าสมาชิก)',
+                        'Star Reward Offers & Expiry Dates (Member Modal)'
+                      )}
+                    </h3>
+                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                      {tx(
+                        'กำหนดจำนวนดาวที่ต้องใช้ รายละเอียด เงื่อนไข และวันหมดเขตที่แสดงให้ลูกค้าเห็น',
+                        'Configure stars required, reward details, terms, and expiry dates shown to members'
+                      )}
+                    </p>
+                  </div>
+                  {scriptUrl.trim() && (
+                    <button
+                      type="button"
+                      disabled={syncing}
+                      onClick={handlePushRewardsToSheets}
+                      className="px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                      style={{
+                        backgroundColor: 'var(--pastel-blue)',
+                        borderColor: 'var(--border-soft)',
+                        color: 'var(--pastel-blue-text)',
+                      }}
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
+                      {tx('ส่งขึ้น Google Sheets', 'Push to Google Sheets')}
+                    </button>
+                  )}
+                </div>
+
+                {/* Add New Reward Offer */}
+                <form
+                  onSubmit={handleAddRewardOffer}
+                  className="rounded-2xl border p-4 space-y-2.5"
+                  style={{ backgroundColor: 'var(--pastel-peach)', borderColor: 'var(--border-soft)' }}
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-12 gap-2.5">
+                    <input
+                      type="text"
+                      value={newRewardTitle}
+                      onChange={(e) => setNewRewardTitle(e.target.value)}
+                      placeholder={tx('ชื่อของรางวัล เช่น ฟรี! ชาไทยเย็น 1 แก้ว', 'Reward title (e.g. Free! 1 Iced Thai Tea)')}
+                      className="sm:col-span-6 h-10 px-3 rounded-xl border text-xs sm:text-sm"
+                      style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                    />
+                    <div className="sm:col-span-3 relative">
+                      <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="number"
+                        min="1"
+                        value={newRewardStars}
+                        onChange={(e) => setNewRewardStars(e.target.value)}
+                        placeholder={tx('จำนวนดาว', 'Stars')}
+                        className="w-full h-10 pl-8 pr-2 rounded-xl border text-xs sm:text-sm font-num"
+                        style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                      />
+                    </div>
+                    <input
+                      type="text"
+                      value={newRewardExpiry}
+                      onChange={(e) => setNewRewardExpiry(e.target.value)}
+                      placeholder={tx('หมดเขต (เช่น 31 ธ.ค. 2569)', 'Expiry (e.g. 31 Dec 2026)')}
+                      className="sm:col-span-3 h-10 px-3 rounded-xl border text-xs sm:text-sm"
+                      style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                    />
+                  </div>
+                  <input
+                    type="text"
+                    value={newRewardDesc}
+                    onChange={(e) => setNewRewardDesc(e.target.value)}
+                    placeholder={tx('รายละเอียดของรางวัล...', 'Reward description...')}
+                    className="w-full h-10 px-3 rounded-xl border text-xs sm:text-sm"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                  />
+                  <input
+                    type="text"
+                    value={newRewardTerms}
+                    onChange={(e) => setNewRewardTerms(e.target.value)}
+                    placeholder={tx(
+                      'เงื่อนไขการใช้สิทธิ์ (เช่น แลกได้ 1 สิทธิ์/บิล ไม่สามารถแลกเป็นเงินสด)',
+                      'Terms & conditions (e.g. 1 per bill, non-exchangeable for cash)'
+                    )}
+                    className="w-full h-10 px-3 rounded-xl border text-xs sm:text-sm"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                  />
+                  <button
+                    type="submit"
+                    className="px-4 h-10 rounded-xl font-bold text-xs sm:text-sm text-white flex items-center gap-1.5 cursor-pointer"
+                    style={{ backgroundColor: 'var(--accent-primary)' }}
+                  >
+                    <Plus className="w-4 h-4" />
+                    {tx('เพิ่มข้อเสนอแลกดาว', 'Add Star Reward')}
+                  </button>
+                </form>
+
+                {/* Existing Reward Offers */}
+                <div className="space-y-2.5">
+                  {rewardOffers.map((rw) => (
+                    <div
+                      key={rw.id}
+                      className="rounded-2xl border p-3.5 space-y-2"
+                      style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                    >
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                        <input
+                          type="text"
+                          value={rw.title}
+                          onChange={(e) => handleUpdateRewardOffer(rw.id, 'title', e.target.value)}
+                          className="sm:col-span-5 h-9 px-3 rounded-xl border text-xs sm:text-sm font-bold"
+                          style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                        />
+                        <div className="sm:col-span-2 flex items-center gap-1">
+                          <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-400 shrink-0" />
+                          <input
+                            type="number"
+                            min="1"
+                            value={rw.starsRequired}
+                            onChange={(e) =>
+                              handleUpdateRewardOffer(
+                                rw.id,
+                                'starsRequired',
+                                Math.max(1, parseInt(e.target.value, 10) || 1)
+                              )
+                            }
+                            className="w-full h-9 px-2 rounded-xl border text-xs font-num font-bold"
+                            style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                          />
+                        </div>
+                        <input
+                          type="text"
+                          value={rw.expiryDate}
+                          onChange={(e) => handleUpdateRewardOffer(rw.id, 'expiryDate', e.target.value)}
+                          placeholder={tx('วันหมดเขต', 'Expiry Date')}
+                          className="sm:col-span-3 h-9 px-2.5 rounded-xl border text-xs"
+                          style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                        />
+                        <div className="sm:col-span-2 flex items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleUpdateRewardOffer(rw.id, 'active', !rw.active)}
+                            className="px-2.5 h-9 rounded-xl text-[11px] font-bold cursor-pointer"
+                            style={{
+                              backgroundColor: rw.active ? 'var(--accent-soft)' : 'var(--bg-subtle)',
+                              color: rw.active ? 'var(--accent-text)' : 'var(--text-muted)',
+                            }}
+                          >
+                            {rw.active ? tx('แสดงอยู่', 'Active') : tx('ซ่อนไว้', 'Hidden')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteRewardOffer(rw.id)}
+                            className="w-9 h-9 rounded-xl flex items-center justify-center cursor-pointer"
+                            style={{ backgroundColor: 'var(--pastel-pink)', color: 'var(--pastel-pink-text)' }}
+                            aria-label={tx('ลบข้อเสนอ', 'Delete offer')}
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        type="text"
+                        value={rw.description}
+                        onChange={(e) => handleUpdateRewardOffer(rw.id, 'description', e.target.value)}
+                        placeholder={tx('รายละเอียดของรางวัล...', 'Reward description...')}
+                        className="w-full h-9 px-3 rounded-xl border text-xs"
+                        style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                      />
+                      <input
+                        type="text"
+                        value={rw.terms}
+                        onChange={(e) => handleUpdateRewardOffer(rw.id, 'terms', e.target.value)}
+                        placeholder={tx('เงื่อนไขการใช้สิทธิ์...', 'Terms & conditions...')}
+                        className="w-full h-9 px-3 rounded-xl border text-xs"
+                        style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-3 border-t pt-4" style={{ borderColor: 'var(--border-soft)' }}>
+                <h3 className="text-base font-bold">
+                  {tx('💬 จัดการรายการ "ถาม-ตอบด่วน"', '💬 Manage "Quick FAQ" Items')}
+                </h3>
+
+                {/* Add New FAQ */}
+                <form
+                  onSubmit={handleAddFaq}
+                  className="rounded-2xl border p-4 space-y-2.5"
+                  style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                >
+                  <input
+                    type="text"
+                    value={newQuestion}
+                    onChange={(e) => setNewQuestion(e.target.value)}
+                    placeholder={tx('พิมพ์คำถามใหม่ เช่น มีที่จอดรถไหมคะ?', 'Enter new question (e.g. Is parking available?)')}
+                    className="w-full h-11 px-3.5 rounded-xl border text-sm"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                  />
+                  <textarea
+                    rows={2}
+                    value={newAnswer}
+                    onChange={(e) => setNewAnswer(e.target.value)}
+                    placeholder={tx('พิมพ์คำตอบสำเร็จรูป...', 'Enter preset answer...')}
+                    className="w-full p-3 rounded-xl border text-sm"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                  />
+                  <button
+                    type="submit"
+                    className="px-4 h-10 rounded-xl font-bold text-xs sm:text-sm text-white flex items-center gap-1.5 cursor-pointer"
+                    style={{ backgroundColor: 'var(--accent-primary)' }}
+                  >
+                    <Plus className="w-4 h-4" />
+                    {tx('เพิ่มคำถาม-คำตอบ', 'Add FAQ Item')}
+                  </button>
+                </form>
+
+                {/* Existing FAQs */}
+                <div className="space-y-2.5">
+                  {faqs.map((f) => (
+                    <div
+                      key={f.id}
+                      className="rounded-2xl border p-3.5 space-y-2"
+                      style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                    >
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={f.question}
+                          onChange={(e) => handleUpdateFaq(f.id, 'question', e.target.value)}
+                          className="flex-1 h-10 px-3 rounded-xl border text-sm font-semibold"
+                          style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteFaq(f.id)}
+                          className="w-10 h-10 rounded-xl flex items-center justify-center cursor-pointer"
+                          style={{ backgroundColor: 'var(--pastel-pink)', color: 'var(--pastel-pink-text)' }}
+                          aria-label={tx('ลบคำถาม', 'Delete question')}
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                      <textarea
+                        rows={2}
+                        value={f.answer}
+                        onChange={(e) => handleUpdateFaq(f.id, 'answer', e.target.value)}
+                        className="w-full p-2.5 rounded-xl border text-xs sm:text-sm"
+                        style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* ================= TAB 5: GOOGLE SHEETS BACKEND SYNC ================= */}
+          {activeTab === 'sheets' && (
+            <div className="space-y-5">
+              <div className="space-y-2.5">
+                <label className="block text-sm font-bold" style={{ color: 'var(--text-main)' }}>
+                  {tx('ลิงก์ Google Apps Script Web App URL (scriptUrl)', 'Google Apps Script Web App URL (scriptUrl)')}
+                </label>
+                <input
+                  type="url"
+                  value={scriptUrl}
+                  onChange={(e) => onChangeScriptUrl(e.target.value)}
+                  placeholder="https://script.google.com/macros/s/.../exec"
+                  className="w-full h-12 px-4 rounded-2xl border text-sm font-mono"
+                  style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                />
+                <div className="flex flex-wrap gap-2.5 pt-1">
+                  <button
+                    type="button"
+                    disabled={syncing}
+                    onClick={handleSyncAll}
+                    className="px-4 h-12 rounded-2xl font-bold text-sm text-white flex items-center gap-2 cursor-pointer"
+                    style={{ backgroundColor: 'var(--accent-primary)' }}
+                  >
+                    <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
+                    {tx('🔄 ซิงค์ข้อมูลทั้งหมดจาก Google Sheets', '🔄 Sync All Data from Google Sheets')}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={syncing}
+                    onClick={handleFlushQueue}
+                    className="px-4 h-12 rounded-2xl border font-semibold text-sm flex items-center gap-2 cursor-pointer"
+                    style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                  >
+                    <Wifi className="w-4 h-4" />
+                    {tx(`คิวออฟไลน์ค้างส่ง (${offlineQueue.length})`, `Offline Queue (${offlineQueue.length})`)}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={syncing}
+                    onClick={handlePushAllToSheets}
+                    className="px-4 h-12 rounded-2xl border font-bold text-sm flex items-center gap-2 cursor-pointer"
+                    style={{
+                      backgroundColor: 'var(--pastel-blue)',
+                      borderColor: 'var(--border-soft)',
+                      color: 'var(--pastel-blue-text)',
+                    }}
+                  >
+                    <Upload className="w-4 h-4" />
+                    {tx('📤 ส่งข้อมูลเริ่มต้นทั้งหมดขึ้น Sheet', '📤 Push Initial Data to Sheet')}
+                  </button>
+                </div>
+              </div>
+
+              {/* 5 Backend Config Tabs Guide */}
+              <div
+                className="rounded-2xl border p-4 space-y-2 text-xs"
+                style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+              >
+                <p className="font-bold text-sm">
+                  {tx(
+                    'โครงสร้าง 5 แท็บสำหรับแก้ไขหลังบ้านใน Google Sheets:',
+                    '5 Backend Sheet Tabs Structure (Google Sheets):'
+                  )}
+                </p>
+                <ul className="list-disc pl-5 space-y-1" style={{ color: 'var(--text-muted)' }}>
+                  <li>
+                    <strong>ตั้งค่าระบบ</strong>{' '}
+                    {tx(
+                      '(คอลัมน์ A: key, B: value เช่น orgCode, shopNameTh, foodShopNameTh, promptPayId, rewardNotice, promoTitle, promoSubtitle)',
+                      '(Col A: key, Col B: value — orgCode, shopNameTh, foodShopNameTh, promptPayId, rewardNotice, promoTitle, promoSubtitle)'
+                    )}
+                  </li>
+                  <li>
+                    <strong>ตั้งค่าเมนู</strong>{' '}
+                    {tx(
+                      '(เลขบาร์โค้ด, ชื่อสินค้า, ราคา, จำนวนดาว, หมวดหมู่, ลิงก์รูปภาพ, สถานะ พร้อมขาย/หมด)',
+                      '(Barcode, Name, Price, Stars, Category, ImageURL, Status)'
+                    )}
+                  </li>
+                  <li>
+                    <strong>ผู้ใช้งานและPIN</strong>{' '}
+                    {tx('(pin, name, role คือ admin หรือ cashier)', '(pin, name, role: admin or cashier)')}
+                  </li>
+                  <li>
+                    <strong>ถามตอบลูกค้า</strong> (id, question, answer)
+                  </li>
+                  <li>
+                    <strong>โปรโมชันแลกดาว</strong>{' '}
+                    {tx(
+                      '(id, ชื่อของรางวัล, ดาวที่ใช้, รายละเอียด, เงื่อนไข, วันหมดเขต, เปิดใช้งาน)',
+                      '(id, title, starsRequired, description, terms, expiryDate, active)'
+                    )}
+                  </li>
+                </ul>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <h4 className="text-sm font-bold" style={{ color: 'var(--text-main)' }}>
+                    {tx(
+                      'โค้ด Google Apps Script สำเร็จรูป (รองรับ 4 แท็บหลังบ้าน + 2 ร้าน + ทดสอบระบบ)',
+                      'Ready-to-Use Google Apps Script (Supports 5 Backend Tabs + 2 Shops + Test Mode)'
+                    )}
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={handleCopyScript}
+                    className="px-3.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                    style={{ backgroundColor: 'var(--accent-soft)', color: 'var(--accent-text)' }}
+                  >
+                    {copiedScript ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    {copiedScript ? tx('คัดลอกแล้ว!', 'Copied!') : tx('คัดลอกโค้ด', 'Copy Code')}
+                  </button>
+                </div>
+                <pre
+                  className="p-3.5 rounded-2xl border text-xs font-mono overflow-x-auto max-h-56"
+                  style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                >
+                  {APPS_SCRIPT_TEMPLATE}
+                </pre>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Footer Close */}
+        <div
+          className="px-6 py-4 border-t shrink-0 flex justify-end"
+          style={{ borderColor: 'var(--border-soft)' }}
+        >
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-6 h-12 rounded-2xl font-bold text-white cursor-pointer"
+            style={{ backgroundColor: 'var(--accent-primary)' }}
+          >
+            {tx('บันทึก & กลับหน้าขาย', 'Save & Back to POS')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};

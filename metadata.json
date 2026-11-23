@@ -1,0 +1,6 @@
+{
+  "name": "กุ๊กกิ๊กกิ๊กพาเพลิน POS (kookkikpaplern)",
+  "description": "ระบบคิดเงินหน้าร้าน (POS) สะสมดาว และผู้ช่วย AI คลายเหงา สำหรับร้านกุ๊กกิ๊กกิ๊กพาเพลิน",
+  "requestFramePermissions": ["camera", "microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

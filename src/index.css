@@ -1,0 +1,128 @@
+@import "tailwindcss";
+
+:root,
+[data-theme="mint-earth"] {
+  --bg-canvas: #FAF6F0;
+  --bg-subtle: #F3ECE0;
+  --bg-card: #FFFDF9;
+  --border-soft: #E6DDD0;
+  --text-main: #2F2620;
+  --text-muted: #786B5E;
+  --accent-primary: #5FB894;
+  --accent-primary-hover: #4BA37F;
+  --accent-soft: #E3F5ED;
+  --accent-border: #A8DFC9;
+  --accent-text: #22664C;
+  --pastel-peach: #FBE4D8;
+  --pastel-peach-text: #9C4F32;
+  --pastel-blue: #E1F0F8;
+  --pastel-blue-text: #2E6480;
+  --pastel-pink: #FBE6EE;
+  --pastel-pink-text: #9A3B5E;
+}
+
+[data-theme="peach-pastel"] {
+  --bg-canvas: #FFF7F2;
+  --bg-subtle: #F9EAE1;
+  --bg-card: #FFFFFF;
+  --border-soft: #F0DCD0;
+  --text-main: #362721;
+  --text-muted: #7F695E;
+  --accent-primary: #E08568;
+  --accent-primary-hover: #CC7256;
+  --accent-soft: #FCECE5;
+  --accent-border: #F5C3B0;
+  --accent-text: #8C3F28;
+  --pastel-peach: #FDE5D6;
+  --pastel-peach-text: #9B4B2F;
+  --pastel-blue: #E6F2F6;
+  --pastel-blue-text: #2E6378;
+  --pastel-pink: #FBE5EC;
+  --pastel-pink-text: #973A58;
+}
+
+[data-theme="matcha-warm"] {
+  --bg-canvas: #F4F7F2;
+  --bg-subtle: #E8EFE4;
+  --bg-card: #FCFDFB;
+  --border-soft: #D7E3D2;
+  --text-main: #243025;
+  --text-muted: #5F6F5F;
+  --accent-primary: #689D72;
+  --accent-primary-hover: #55865E;
+  --accent-soft: #E4F1E6;
+  --accent-border: #B5D5BA;
+  --accent-text: #2D5A36;
+  --pastel-peach: #FAEBDC;
+  --pastel-peach-text: #8E5629;
+  --pastel-blue: #E4F1F5;
+  --pastel-blue-text: #2E6373;
+  --pastel-pink: #F7E9EE;
+  --pastel-pink-text: #8B425A;
+}
+
+[data-theme="lavender-milk"] {
+  --bg-canvas: #F7F5FA;
+  --bg-subtle: #ECE7F4;
+  --bg-card: #FDFCFE;
+  --border-soft: #DFD8EB;
+  --text-main: #2B2536;
+  --text-muted: #6C637C;
+  --accent-primary: #8475B8;
+  --accent-primary-hover: #7060A4;
+  --accent-soft: #ECE8F7;
+  --accent-border: #C8BFE6;
+  --accent-text: #463978;
+  --pastel-peach: #FCEBE2;
+  --pastel-peach-text: #945136;
+  --pastel-blue: #E6EFF8;
+  --pastel-blue-text: #345C85;
+  --pastel-pink: #F9E7F1;
+  --pastel-pink-text: #8E3D68;
+}
+
+@layer base {
+  html,
+  body {
+    font-family: 'Prompt', 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+    background-color: var(--bg-canvas);
+    color: var(--text-main);
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+.font-display {
+  font-family: 'Prompt', 'Plus Jakarta Sans', sans-serif;
+}
+
+.font-en {
+  font-family: 'Plus Jakarta Sans', 'Prompt', sans-serif;
+}
+
+.font-num {
+  font-family: 'JetBrains Mono', 'Plus Jakarta Sans', monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes bear-bounce {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-5px);
+  }
+}
+
+.animate-bear-happy {
+  animation: bear-bounce 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-bear-happy {
+    animation: none;
+  }
+}
