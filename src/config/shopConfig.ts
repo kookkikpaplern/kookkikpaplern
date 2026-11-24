@@ -14,6 +14,7 @@ export interface MenuItem {
   category: string;
   imageUrl?: string;
   status: 'พร้อมขาย' | 'หมด';
+  stockMode?: 'unlimited';
 }
 
 export interface FaqItem {
@@ -73,6 +74,27 @@ export const THEME_OPTIONS: ThemeOption[] = [
   },
 ];
 
+export interface PaymentAccount {
+  id: string;
+  bankName: string;
+  accountName: string;
+  accountNumber: string;
+  promptPayId?: string;
+  qrImageUrl?: string;
+}
+
+export const BANK_PRESETS: Array<{ name: string; badgeColor: string; textColor: string }> = [
+  { name: 'พร้อมเพย์ (PromptPay)', badgeColor: '#E0F2FE', textColor: '#0369A1' },
+  { name: 'ธนาคารกสิกรไทย (KBank)', badgeColor: '#DCFCE7', textColor: '#166534' },
+  { name: 'ธนาคารไทยพาณิชย์ (SCB)', badgeColor: '#F3E8FF', textColor: '#6B21A8' },
+  { name: 'ธนาคารกรุงไทย (Krungthai)', badgeColor: '#DBEAFE', textColor: '#1D4ED8' },
+  { name: 'ธนาคารกรุงเทพ (Bangkok Bank)', badgeColor: '#E0E7FF', textColor: '#3730A3' },
+  { name: 'ธนาคารกรุงศรีอยุธยา (Krungsri)', badgeColor: '#FEF9C3', textColor: '#854D0E' },
+  { name: 'ธนาคารออมสิน (GSB)', badgeColor: '#FCE7F3', textColor: '#9D174D' },
+  { name: 'ธนาคารทีทีบี (ttb)', badgeColor: '#FFEDD5', textColor: '#9A3412' },
+  { name: 'ทรูมันนี่ วอลเล็ท (TrueMoney)', badgeColor: '#FEE2E2', textColor: '#B91C1C' },
+];
+
 // ============================================================================
 // บล็อกตั้งค่าจุดเดียว (SINGLE CONFIG BLOCK) - แก้ไขค่าเริ่มต้นของร้านได้ที่นี่จุดเดียว
 // ============================================================================
@@ -91,6 +113,16 @@ export const SHOP_CONFIG = {
   foodShopNameEn: 'Krua Mae Wang',
   promptPayId: '0837596411',
   promptPayAccountName: 'คำวัง พวงมาลา',
+  paymentAccounts: [
+    {
+      id: 'acc_default_pp',
+      bankName: 'พร้อมเพย์ (PromptPay)',
+      accountName: 'คำวัง พวงมาลา',
+      accountNumber: '0837596411',
+      promptPayId: '0837596411',
+    },
+  ] as PaymentAccount[],
+  lineShopUrl: '',
   scriptUrl:
     'https://script.google.com/macros/s/AKfycbx0HhQUqRtnnSKJwIp_Ld7QRtmg-kdbEq4J9M6T_WtlRjuWBSdwVSYYHH_V2OAH8cp_/exec',
   rewardNotice: '⭐ สะสมครบ 50 ดาว แลกฟรี! เมนูแนะนำ 1 อย่าง',

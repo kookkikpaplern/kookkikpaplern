@@ -13,12 +13,15 @@ import {
   Home,
   LogOut,
   MessageCircleQuestion,
+  PauseCircle,
+  Receipt,
   RotateCcw,
+  ScanLine,
   Settings,
   UtensilsCrossed,
   Video,
 } from 'lucide-react';
-import { FaqItem, MenuItem, RewardOffer, SHOP_CONFIG, StaffUser, ThemeId } from './config/shopConfig';
+import { FaqItem, MenuItem, PaymentAccount, RewardOffer, SHOP_CONFIG, StaffUser, ThemeId } from './config/shopConfig';
 import {
   LanguageToggleButton,
   translateMenuName,
@@ -38,6 +41,7 @@ import { ShopLogoFrame } from './components/ShopLogoFrame';
 import { CalculatorPOS } from './components/CalculatorPOS';
 import { CustomerMenuPOS } from './components/CustomerMenuPOS';
 import { BarcodeScannerModal } from './components/BarcodeScannerModal';
+import { ExitSlipScannerModal } from './components/ExitSlipScannerModal';
 import {
   CashPaymentModal,
   PaymentSuccessOverlay,
@@ -51,23 +55,35 @@ import { CallPeerSummary, RemoteWatchModal } from './components/RemoteWatchModal
 import {
   BillLineItem,
   CustomerQueueOrder,
+  fetchOnlineOrdersFromSheets,
   flushOfflineQueue,
+  getReceiptSlipsCache,
   getTodayDateKey,
   loadCachedFaqs,
   loadCachedMenu,
   loadCachedRewardOffers,
   loadCachedStaffUsers,
   loadDailyTestMode,
+  markSaleHistoryExited,
   postToSheets,
+  ReceiptSlipRecord,
   recordSilentVoid,
   saveCachedFaqs,
   saveCachedMenu,
   saveCachedRewardOffers,
   saveDailyTestMode,
+  saveReceiptSlipsCache,
   saveSaleHistoryLog,
   syncAllFromSheets,
 } from './utils/sheetsSync';
-import { playScanError, playScanSuccess, playSoftClick, playSuccessChime } from './utils/sound';
+import {
+  playNewOrderBell,
+  playScanError,
+  playScanSuccess,
+  playSoftClick,
+  playSuccessChime,
+} from './utils/sound';
+import { SharedShopConfigPayload, useRealtimeShopSync } from './utils/realtimeSync';
 
 const KEYS = {
   CONFIG_VER: 'kkp_config_version',
@@ -81,6 +97,9 @@ const KEYS = {
   FOOD_NAME_EN: 'kkp_food_shop_name_en',
   PROMPTPAY: 'kkp_promptpay_id',
   PROMPTPAY_NAME: 'kkp_promptpay_account_name',
+  PAYMENT_ACCOUNTS: 'kkp_payment_accounts',
+  ACTIVE_PAYMENT_ACCOUNT_ID: 'kkp_active_payment_account_id',
+  LINE_SHOP_URL: 'kkp_line_shop_url',
   SCRIPT_URL: 'kkp_script_url',
   REWARD_NOTICE: 'kkp_reward_notice',
   PROMO_TITLE: 'kkp_promo_title',
@@ -89,6 +108,7 @@ const KEYS = {
   FAQ_TITLE: 'kkp_faq_modal_title',
   FAQ_SUBTITLE: 'kkp_faq_modal_subtitle',
   ONLINE_ORDER: 'kkp_online_order_enabled',
+  RECEIPT_SLIP: 'kkp_receipt_slip_enabled',
   AUTO_CHECK: 'kkp_auto_payment_check',
   QUEUE: 'kkp_customer_queue',
   TOOLBAR_ORDER: 'kkp_toolbar_order',
@@ -144,6 +164,8 @@ ensureLatestShopConfig();
 
 type ToolbarItemId =
   | 'modeSwitch'
+  | 'exitScanner'
+  | 'receiptSlipToggle'
   | 'watchShop'
   | 'dressing'
   | 'guide'
@@ -154,6 +176,8 @@ type ToolbarItemId =
 
 const DEFAULT_TOOLBAR_ORDER: ToolbarItemId[] = [
   'modeSwitch',
+  'exitScanner',
+  'receiptSlipToggle',
   'watchShop',
   'dressing',
   'guide',
@@ -204,6 +228,125 @@ export default function App() {
   const [promptPayAccountName, setPromptPayAccountName] = useState<string>(
     () => localStorage.getItem(KEYS.PROMPTPAY_NAME) || SHOP_CONFIG.promptPayAccountName
   );
+  const [paymentAccounts, setPaymentAccounts] = useState<PaymentAccount[]>(() => {
+    try {
+      const raw = localStorage.getItem(KEYS.PAYMENT_ACCOUNTS);
+      if (raw) {
+        const parsed = JSON.parse(raw) as PaymentAccount[];
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {
+      // Ignore malformed JSON
+    }
+    const seededId = localStorage.getItem(KEYS.PROMPTPAY) || SHOP_CONFIG.promptPayId;
+    const seededName = localStorage.getItem(KEYS.PROMPTPAY_NAME) || SHOP_CONFIG.promptPayAccountName;
+    if (seededId || seededName) {
+      return [
+        {
+          id: 'acc_default_pp',
+          bankName: 'พร้อมเพย์ (PromptPay)',
+          accountName: seededName,
+          accountNumber: seededId,
+          promptPayId: seededId,
+        },
+      ];
+    }
+    return SHOP_CONFIG.paymentAccounts;
+  });
+  const [activePaymentAccountId, setActivePaymentAccountId] = useState<string>(() => {
+    const savedId = localStorage.getItem(KEYS.ACTIVE_PAYMENT_ACCOUNT_ID);
+    return savedId || 'acc_default_pp';
+  });
+
+  const activePaymentAccount =
+    paymentAccounts.find((a) => a.id === activePaymentAccountId) || paymentAccounts[0];
+
+  const syncBroadcastRef = useRef<{
+    broadcastOrderCreated: (order: CustomerQueueOrder) => void;
+    broadcastOrderUpdated: (
+      orderId: string,
+      patch: Partial<Pick<CustomerQueueOrder, 'accepted' | 'status'>>
+    ) => void;
+    broadcastConfigUpdated: (payload: SharedShopConfigPayload) => void;
+    broadcastReceiptCreated: (receipt: ReceiptSlipRecord) => void;
+    broadcastReceiptExited: (billId: string, exitedAt: string, exitedBy: string) => void;
+  }>({
+    broadcastOrderCreated: () => {},
+    broadcastOrderUpdated: () => {},
+    broadcastConfigUpdated: () => {},
+    broadcastReceiptCreated: () => {},
+    broadcastReceiptExited: () => {},
+  });
+
+  const pushSettingsTimerRef = useRef<number | null>(null);
+  const pushConfigSnapshotRef = useRef<(overrides?: Record<string, string>, immediate?: boolean) => void>(() => {});
+
+  const handleChangePaymentAccounts = useCallback(
+    (next: PaymentAccount[]) => {
+      const sanitized = next.length > 0 ? next : SHOP_CONFIG.paymentAccounts;
+      setPaymentAccounts(sanitized);
+      localStorage.setItem(KEYS.PAYMENT_ACCOUNTS, JSON.stringify(sanitized));
+      const activeAcc = sanitized.find((a) => a.id === activePaymentAccountId) || sanitized[0];
+      const nextActiveId = activeAcc?.id || activePaymentAccountId;
+      let nextPp = promptPayId;
+      let nextPpName = promptPayAccountName;
+      if (activeAcc) {
+        if (activeAcc.id !== activePaymentAccountId) {
+          setActivePaymentAccountId(activeAcc.id);
+          localStorage.setItem(KEYS.ACTIVE_PAYMENT_ACCOUNT_ID, activeAcc.id);
+        }
+        nextPp = activeAcc.promptPayId || activeAcc.accountNumber;
+        nextPpName = activeAcc.accountName;
+        setPromptPayId(nextPp);
+        setPromptPayAccountName(nextPpName);
+        localStorage.setItem(KEYS.PROMPTPAY, nextPp);
+        localStorage.setItem(KEYS.PROMPTPAY_NAME, nextPpName);
+      }
+      pushConfigSnapshotRef.current(
+        {
+          paymentAccountsJson: JSON.stringify(
+            sanitized.map((a) => ({ ...a, qrImageUrl: a.qrImageUrl || undefined }))
+          ),
+          activePaymentAccountId: nextActiveId,
+          promptPayId: nextPp,
+          promptPayAccountName: nextPpName,
+        },
+        true
+      );
+    },
+    [activePaymentAccountId, promptPayId, promptPayAccountName]
+  );
+
+  const handleSelectActivePaymentAccount = useCallback(
+    (id: string) => {
+      setActivePaymentAccountId(id);
+      localStorage.setItem(KEYS.ACTIVE_PAYMENT_ACCOUNT_ID, id);
+      const activeAcc = paymentAccounts.find((a) => a.id === id);
+      let nextPp = promptPayId;
+      let nextPpName = promptPayAccountName;
+      if (activeAcc) {
+        nextPp = activeAcc.promptPayId || activeAcc.accountNumber;
+        nextPpName = activeAcc.accountName;
+        setPromptPayId(nextPp);
+        setPromptPayAccountName(nextPpName);
+        localStorage.setItem(KEYS.PROMPTPAY, nextPp);
+        localStorage.setItem(KEYS.PROMPTPAY_NAME, nextPpName);
+      }
+      pushConfigSnapshotRef.current(
+        {
+          activePaymentAccountId: id,
+          promptPayId: nextPp,
+          promptPayAccountName: nextPpName,
+        },
+        true
+      );
+    },
+    [paymentAccounts, promptPayId, promptPayAccountName]
+  );
+
+  const [lineShopUrl, setLineShopUrl] = useState<string>(
+    () => localStorage.getItem(KEYS.LINE_SHOP_URL) || SHOP_CONFIG.lineShopUrl
+  );
   const [scriptUrl, setScriptUrl] = useState<string>(
     () => localStorage.getItem(KEYS.SCRIPT_URL) || SHOP_CONFIG.scriptUrl
   );
@@ -233,6 +376,10 @@ export default function App() {
     const saved = localStorage.getItem(KEYS.ONLINE_ORDER);
     return saved === null ? true : saved === 'true';
   });
+  const [receiptSlipEnabled, setReceiptSlipEnabled] = useState<boolean>(() => {
+    const saved = localStorage.getItem(KEYS.RECEIPT_SLIP);
+    return saved === null ? true : saved === 'true';
+  });
   const [enableAutoPaymentCheck, setEnableAutoPaymentCheck] = useState<boolean>(() => {
     const saved = localStorage.getItem(KEYS.AUTO_CHECK);
     return saved === null ? SHOP_CONFIG.enableAutoPaymentCheck : saved === 'true';
@@ -257,9 +404,11 @@ export default function App() {
       return [];
     }
   });
+  const [receipts, setReceipts] = useState<ReceiptSlipRecord[]>(() => getReceiptSlipsCache());
 
   // Modals & Notifications
   const [scannerOpen, setScannerOpen] = useState(false);
+  const [exitScannerOpen, setExitScannerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<AdminSettingsTab>('general');
   const [guideOpen, setGuideOpen] = useState(false);
@@ -294,13 +443,20 @@ export default function App() {
     stars: number;
     source: 'calculator' | 'menu';
     method: 'เงินสด' | 'สแกน QR';
-    deliveryInfo?: { deliveryType: 'รับเองที่ร้าน' | 'ให้พ่อไปส่ง'; customerName: string; dropPoint: string };
+    deliveryInfo?: {
+      deliveryType: 'ทานนี้' | 'กลับบ้าน' | 'รับเองที่ร้าน' | 'ให้พ่อไปส่ง';
+      tableNumber?: string;
+      customerName: string;
+      dropPoint: string;
+    };
+    receipt?: ReceiptSlipRecord | null;
   }>({
     step: 'idle',
     amount: 0,
     stars: 0,
     source: 'calculator',
     method: 'เงินสด',
+    receipt: null,
   });
 
   // Apply selected theme to document root
@@ -309,10 +465,14 @@ export default function App() {
     localStorage.setItem(KEYS.THEME, themeId);
   }, [themeId]);
 
-  // Persist Queue
+  // Persist Queue & Receipts
   useEffect(() => {
     localStorage.setItem(KEYS.QUEUE, JSON.stringify(queueOrders));
   }, [queueOrders]);
+
+  useEffect(() => {
+    saveReceiptSlipsCache(receipts);
+  }, [receipts]);
 
   // Daily auto-reset check (every minute + on mount)
   useEffect(() => {
@@ -389,6 +549,344 @@ export default function App() {
     };
   }, [viewScreen, currentUser, orgCode]);
 
+  const applySettingsFromRecord = useCallback((s: Record<string, string>) => {
+    if (s.orgCode) {
+      setOrgCode(s.orgCode);
+      localStorage.setItem(KEYS.ORG_CODE, s.orgCode);
+    }
+    if (s.shopNameTh) {
+      setShopNameTh(s.shopNameTh);
+      localStorage.setItem(KEYS.SHOP_NAME_TH, s.shopNameTh);
+    }
+    if (s.shopNameEn) {
+      setShopNameEn(s.shopNameEn);
+      localStorage.setItem(KEYS.SHOP_NAME_EN, s.shopNameEn);
+    }
+    if (s.foodShopNameTh) {
+      setFoodShopNameTh(s.foodShopNameTh);
+      localStorage.setItem(KEYS.FOOD_NAME_TH, s.foodShopNameTh);
+    }
+    if (s.foodShopNameEn) {
+      setFoodShopNameEn(s.foodShopNameEn);
+      localStorage.setItem(KEYS.FOOD_NAME_EN, s.foodShopNameEn);
+    }
+    if (s.promptPayId) {
+      setPromptPayId(s.promptPayId);
+      localStorage.setItem(KEYS.PROMPTPAY, s.promptPayId);
+    }
+    if (s.promptPayAccountName) {
+      setPromptPayAccountName(s.promptPayAccountName);
+      localStorage.setItem(KEYS.PROMPTPAY_NAME, s.promptPayAccountName);
+    }
+    if (s.paymentAccountsJson) {
+      try {
+        const parsedAccounts = JSON.parse(s.paymentAccountsJson) as PaymentAccount[];
+        if (Array.isArray(parsedAccounts) && parsedAccounts.length > 0) {
+          setPaymentAccounts(parsedAccounts);
+          localStorage.setItem(KEYS.PAYMENT_ACCOUNTS, JSON.stringify(parsedAccounts));
+          const targetActiveId = s.activePaymentAccountId || parsedAccounts[0].id;
+          setActivePaymentAccountId(targetActiveId);
+          localStorage.setItem(KEYS.ACTIVE_PAYMENT_ACCOUNT_ID, targetActiveId);
+        }
+      } catch {
+        // Ignore malformed paymentAccountsJson
+      }
+    } else if (s.activePaymentAccountId) {
+      setActivePaymentAccountId(s.activePaymentAccountId);
+      localStorage.setItem(KEYS.ACTIVE_PAYMENT_ACCOUNT_ID, s.activePaymentAccountId);
+    }
+    if (s.lineShopUrl !== undefined) {
+      setLineShopUrl(s.lineShopUrl);
+      localStorage.setItem(KEYS.LINE_SHOP_URL, s.lineShopUrl);
+    }
+    if (s.rewardNotice) {
+      setRewardNotice(s.rewardNotice);
+      localStorage.setItem(KEYS.REWARD_NOTICE, s.rewardNotice);
+    }
+    if (s.promoTitle) {
+      setPromoTitle(s.promoTitle);
+      localStorage.setItem(KEYS.PROMO_TITLE, s.promoTitle);
+    }
+    if (s.promoSubtitle) {
+      setPromoSubtitle(s.promoSubtitle);
+      localStorage.setItem(KEYS.PROMO_SUBTITLE, s.promoSubtitle);
+    }
+    if (s.faqBubbleText) {
+      setFaqBubbleText(s.faqBubbleText);
+      localStorage.setItem(KEYS.FAQ_BUBBLE, s.faqBubbleText);
+    }
+    if (s.faqModalTitle) {
+      setFaqModalTitle(s.faqModalTitle);
+      localStorage.setItem(KEYS.FAQ_TITLE, s.faqModalTitle);
+    }
+    if (s.faqModalSubtitle) {
+      setFaqModalSubtitle(s.faqModalSubtitle);
+      localStorage.setItem(KEYS.FAQ_SUBTITLE, s.faqModalSubtitle);
+    }
+    if (s.onlineOrderEnabled !== undefined) {
+      const val = s.onlineOrderEnabled.toLowerCase() !== 'false';
+      setOnlineOrderEnabled(val);
+      localStorage.setItem(KEYS.ONLINE_ORDER, String(val));
+    }
+    if (s.receiptSlipEnabled !== undefined) {
+      const val = s.receiptSlipEnabled.toLowerCase() !== 'false';
+      setReceiptSlipEnabled(val);
+      localStorage.setItem(KEYS.RECEIPT_SLIP, String(val));
+    }
+    if (s.enableAutoPaymentCheck !== undefined) {
+      const val = s.enableAutoPaymentCheck.toLowerCase() === 'true';
+      setEnableAutoPaymentCheck(val);
+      localStorage.setItem(KEYS.AUTO_CHECK, String(val));
+    }
+  }, []);
+
+  const buildSettingsPayload = useCallback(
+    (overrides?: Record<string, string>): Record<string, string> => ({
+      orgCode,
+      shopNameTh,
+      shopNameEn,
+      foodShopNameTh,
+      foodShopNameEn,
+      promptPayId,
+      promptPayAccountName,
+      paymentAccountsJson: JSON.stringify(
+        paymentAccounts.map((a) => ({ ...a, qrImageUrl: a.qrImageUrl || undefined }))
+      ),
+      activePaymentAccountId,
+      lineShopUrl,
+      rewardNotice,
+      promoTitle,
+      promoSubtitle,
+      faqBubbleText,
+      faqModalTitle,
+      faqModalSubtitle,
+      onlineOrderEnabled: String(onlineOrderEnabled),
+      receiptSlipEnabled: String(receiptSlipEnabled),
+      enableAutoPaymentCheck: String(enableAutoPaymentCheck),
+      ...(overrides || {}),
+    }),
+    [
+      orgCode,
+      shopNameTh,
+      shopNameEn,
+      foodShopNameTh,
+      foodShopNameEn,
+      promptPayId,
+      promptPayAccountName,
+      paymentAccounts,
+      activePaymentAccountId,
+      lineShopUrl,
+      rewardNotice,
+      promoTitle,
+      promoSubtitle,
+      faqBubbleText,
+      faqModalTitle,
+      faqModalSubtitle,
+      onlineOrderEnabled,
+      receiptSlipEnabled,
+      enableAutoPaymentCheck,
+    ]
+  );
+
+  useEffect(() => {
+    pushConfigSnapshotRef.current = (overrides?: Record<string, string>, immediate?: boolean) => {
+      const nextSettings = buildSettingsPayload(overrides);
+      syncBroadcastRef.current.broadcastConfigUpdated({ settings: nextSettings });
+      if (!scriptUrl || !scriptUrl.trim()) return;
+      if (pushSettingsTimerRef.current) {
+        window.clearTimeout(pushSettingsTimerRef.current);
+        pushSettingsTimerRef.current = null;
+      }
+      if (immediate) {
+        postToSheets(scriptUrl, 'ตั้งค่าระบบ', { settings: nextSettings });
+      } else {
+        pushSettingsTimerRef.current = window.setTimeout(() => {
+          postToSheets(scriptUrl, 'ตั้งค่าระบบ', { settings: nextSettings });
+          pushSettingsTimerRef.current = null;
+        }, 900);
+      }
+    };
+  }, [buildSettingsPayload, scriptUrl]);
+
+  const showToast = useCallback((type: 'ok' | 'err', text: string) => {
+    setScanToast({ type, text });
+    window.setTimeout(() => setScanToast(null), 3200);
+  }, []);
+
+  const knownOrderIdsRef = useRef<Set<string>>(new Set(queueOrders.map((q) => q.orderId)));
+  useEffect(() => {
+    for (const q of queueOrders) {
+      knownOrderIdsRef.current.add(q.orderId);
+    }
+  }, [queueOrders]);
+
+  const notifyIncomingOrder = useCallback(
+    (incoming: CustomerQueueOrder) => {
+      if (viewScreen !== 'staff-pos') return;
+      playNewOrderBell();
+      const tablePart = incoming.tableNumber ? ` · โต๊ะที่ ${incoming.tableNumber}` : '';
+      showToast(
+        'ok',
+        tx(
+          `🔔 มีออเดอร์ใหม่เข้า! คิวที่ ${incoming.queueNo}${tablePart} (฿${incoming.totalAmount.toLocaleString('th-TH')})`,
+          `New order arrived! Queue #${incoming.queueNo} (฿${incoming.totalAmount.toLocaleString('en-US')})`
+        )
+      );
+    },
+    [viewScreen, showToast, tx]
+  );
+
+  const mergeOrdersIntoState = useCallback(
+    (incomingList: CustomerQueueOrder[], shouldRingOnNew = false) => {
+      let brandNewToRing: CustomerQueueOrder | null = null;
+      for (const inc of incomingList) {
+        if (!knownOrderIdsRef.current.has(inc.orderId)) {
+          knownOrderIdsRef.current.add(inc.orderId);
+          if (shouldRingOnNew && inc.status === 'กำลังทำ' && !inc.accepted) {
+            brandNewToRing = inc;
+          }
+        }
+      }
+      setQueueOrders((prev) => {
+        const byId = new Map(prev.map((q) => [q.orderId, q]));
+        for (const incoming of incomingList) {
+          const existing = byId.get(incoming.orderId);
+          if (!existing) {
+            byId.set(incoming.orderId, incoming);
+          } else {
+            byId.set(incoming.orderId, {
+              ...incoming,
+              accepted: existing.accepted || incoming.accepted,
+              status: existing.status === 'เสร็จแล้ว' ? 'เสร็จแล้ว' : incoming.status,
+              slipImageUrl: existing.slipImageUrl || incoming.slipImageUrl,
+              tableNumber: existing.tableNumber || incoming.tableNumber,
+            });
+          }
+        }
+        return Array.from(byId.values()).sort((a, b) => a.queueNo - b.queueNo);
+      });
+      if (brandNewToRing) {
+        notifyIncomingOrder(brandNewToRing);
+      }
+    },
+    [notifyIncomingOrder]
+  );
+
+  const mergeReceiptsIntoState = useCallback((incomingList: ReceiptSlipRecord[]) => {
+    if (!Array.isArray(incomingList) || incomingList.length === 0) return;
+    setReceipts((prev) => {
+      const byId = new Map(prev.map((r) => [r.billId.toUpperCase(), r]));
+      for (const inc of incomingList) {
+        const key = String(inc.billId || '').trim().toUpperCase();
+        if (!key) continue;
+        const existing = byId.get(key);
+        if (!existing) {
+          byId.set(key, { ...inc, billId: key });
+        } else {
+          byId.set(key, {
+            ...inc,
+            billId: key,
+            exitedAt: existing.exitedAt || inc.exitedAt,
+            exitedBy: existing.exitedBy || inc.exitedBy,
+          });
+        }
+      }
+      return Array.from(byId.values())
+        .sort((a, b) => (b.issuedAt || '').localeCompare(a.issuedAt || ''))
+        .slice(0, 300);
+    });
+  }, []);
+
+  const {
+    broadcastOrderCreated,
+    broadcastOrderUpdated,
+    broadcastConfigUpdated,
+    broadcastReceiptCreated,
+    broadcastReceiptExited,
+  } = useRealtimeShopSync({
+    roomId: orgCode,
+    role: viewScreen === 'staff-pos' ? 'staff' : 'customer',
+    onSyncState: ({ orders, receipts: remoteReceipts, sharedConfig }) => {
+      if (orders.length > 0) {
+        mergeOrdersIntoState(orders, false);
+      }
+      if (remoteReceipts && remoteReceipts.length > 0) {
+        mergeReceiptsIntoState(remoteReceipts);
+      }
+      if (sharedConfig) {
+        if (sharedConfig.settings) applySettingsFromRecord(sharedConfig.settings);
+        if (Array.isArray(sharedConfig.menu) && sharedConfig.menu.length > 0) {
+          setMenuItems(sharedConfig.menu);
+          saveCachedMenu(sharedConfig.menu);
+        }
+        if (Array.isArray(sharedConfig.faqs) && sharedConfig.faqs.length > 0) {
+          setFaqs(sharedConfig.faqs);
+          saveCachedFaqs(sharedConfig.faqs);
+        }
+        if (Array.isArray(sharedConfig.rewardOffers) && sharedConfig.rewardOffers.length > 0) {
+          setRewardOffers(sharedConfig.rewardOffers);
+          saveCachedRewardOffers(sharedConfig.rewardOffers);
+        }
+      }
+    },
+    onRemoteOrderCreated: (order, fromRemote) => {
+      mergeOrdersIntoState([order], fromRemote);
+    },
+    onRemoteOrderUpdated: (orderId, patch) => {
+      setQueueOrders((prev) =>
+        prev.map((q) => (q.orderId === orderId ? { ...q, ...patch } : q))
+      );
+    },
+    onRemoteConfigUpdated: (payload) => {
+      if (payload.settings) applySettingsFromRecord(payload.settings);
+      if (Array.isArray(payload.menu) && payload.menu.length > 0) {
+        setMenuItems(payload.menu);
+        saveCachedMenu(payload.menu);
+      }
+      if (Array.isArray(payload.faqs) && payload.faqs.length > 0) {
+        setFaqs(payload.faqs);
+        saveCachedFaqs(payload.faqs);
+      }
+      if (Array.isArray(payload.rewardOffers) && payload.rewardOffers.length > 0) {
+        setRewardOffers(payload.rewardOffers);
+        saveCachedRewardOffers(payload.rewardOffers);
+      }
+    },
+    onRemoteReceiptCreated: (receipt) => {
+      mergeReceiptsIntoState([receipt]);
+    },
+    onRemoteReceiptUpdated: (billId, patch) => {
+      const key = billId.trim().toUpperCase();
+      setReceipts((prev) =>
+        prev.map((r) =>
+          r.billId.toUpperCase() === key
+            ? {
+                ...r,
+                exitedAt: r.exitedAt || patch.exitedAt,
+                exitedBy: r.exitedBy || patch.exitedBy,
+              }
+            : r
+        )
+      );
+    },
+  });
+
+  useEffect(() => {
+    syncBroadcastRef.current = {
+      broadcastOrderCreated,
+      broadcastOrderUpdated,
+      broadcastConfigUpdated,
+      broadcastReceiptCreated,
+      broadcastReceiptExited,
+    };
+  }, [
+    broadcastOrderCreated,
+    broadcastOrderUpdated,
+    broadcastConfigUpdated,
+    broadcastReceiptCreated,
+    broadcastReceiptExited,
+  ]);
+
   // Sync all backend tabs from Google Sheets
   const syncAllBackendNow = useCallback(async (): Promise<string> => {
     if (!scriptUrl || !scriptUrl.trim()) {
@@ -408,69 +906,7 @@ export default function App() {
     const parts: string[] = [];
 
     if (synced.settings) {
-      const s = synced.settings;
-      if (s.orgCode) {
-        setOrgCode(s.orgCode);
-        localStorage.setItem(KEYS.ORG_CODE, s.orgCode);
-      }
-      if (s.shopNameTh) {
-        setShopNameTh(s.shopNameTh);
-        localStorage.setItem(KEYS.SHOP_NAME_TH, s.shopNameTh);
-      }
-      if (s.shopNameEn) {
-        setShopNameEn(s.shopNameEn);
-        localStorage.setItem(KEYS.SHOP_NAME_EN, s.shopNameEn);
-      }
-      if (s.foodShopNameTh) {
-        setFoodShopNameTh(s.foodShopNameTh);
-        localStorage.setItem(KEYS.FOOD_NAME_TH, s.foodShopNameTh);
-      }
-      if (s.foodShopNameEn) {
-        setFoodShopNameEn(s.foodShopNameEn);
-        localStorage.setItem(KEYS.FOOD_NAME_EN, s.foodShopNameEn);
-      }
-      if (s.promptPayId) {
-        setPromptPayId(s.promptPayId);
-        localStorage.setItem(KEYS.PROMPTPAY, s.promptPayId);
-      }
-      if (s.promptPayAccountName) {
-        setPromptPayAccountName(s.promptPayAccountName);
-        localStorage.setItem(KEYS.PROMPTPAY_NAME, s.promptPayAccountName);
-      }
-      if (s.rewardNotice) {
-        setRewardNotice(s.rewardNotice);
-        localStorage.setItem(KEYS.REWARD_NOTICE, s.rewardNotice);
-      }
-      if (s.promoTitle) {
-        setPromoTitle(s.promoTitle);
-        localStorage.setItem(KEYS.PROMO_TITLE, s.promoTitle);
-      }
-      if (s.promoSubtitle) {
-        setPromoSubtitle(s.promoSubtitle);
-        localStorage.setItem(KEYS.PROMO_SUBTITLE, s.promoSubtitle);
-      }
-      if (s.faqBubbleText) {
-        setFaqBubbleText(s.faqBubbleText);
-        localStorage.setItem(KEYS.FAQ_BUBBLE, s.faqBubbleText);
-      }
-      if (s.faqModalTitle) {
-        setFaqModalTitle(s.faqModalTitle);
-        localStorage.setItem(KEYS.FAQ_TITLE, s.faqModalTitle);
-      }
-      if (s.faqModalSubtitle) {
-        setFaqModalSubtitle(s.faqModalSubtitle);
-        localStorage.setItem(KEYS.FAQ_SUBTITLE, s.faqModalSubtitle);
-      }
-      if (s.onlineOrderEnabled !== undefined) {
-        const val = s.onlineOrderEnabled.toLowerCase() !== 'false';
-        setOnlineOrderEnabled(val);
-        localStorage.setItem(KEYS.ONLINE_ORDER, String(val));
-      }
-      if (s.enableAutoPaymentCheck !== undefined) {
-        const val = s.enableAutoPaymentCheck.toLowerCase() === 'true';
-        setEnableAutoPaymentCheck(val);
-        localStorage.setItem(KEYS.AUTO_CHECK, String(val));
-      }
+      applySettingsFromRecord(synced.settings);
       parts.push(tx('ตั้งค่าระบบ', 'System Settings'));
     }
 
@@ -494,6 +930,11 @@ export default function App() {
       parts.push(tx(`ของรางวัลแลกดาว ${synced.rewardOffers.length} รายการ`, `${synced.rewardOffers.length} reward offers`));
     }
 
+    if (synced.queueOrders && synced.queueOrders.length > 0) {
+      mergeOrdersIntoState(synced.queueOrders, false);
+      parts.push(tx(`ออเดอร์ออนไลน์ ${synced.queueOrders.length} คิว`, `${synced.queueOrders.length} online orders`));
+    }
+
     return parts.length > 0
       ? tx(
           `ซิงค์ข้อมูลจาก Google Sheets สำเร็จ: ${parts.join(', ')}`,
@@ -503,7 +944,17 @@ export default function App() {
           'เชื่อมต่อสำเร็จ แต่ยังไม่มีข้อมูลในแท็บของชีตค่ะ',
           'Connected, but no data found in the sheet tabs yet.'
         );
-  }, [scriptUrl, tx]);
+  }, [scriptUrl, tx, applySettingsFromRecord, mergeOrdersIntoState]);
+
+  const refreshOnlineOrdersNow = useCallback(
+    async (shouldRingOnNew = false) => {
+      if (!scriptUrl || !scriptUrl.trim()) return;
+      const remoteOrders = await fetchOnlineOrdersFromSheets(scriptUrl);
+      if (!remoteOrders || remoteOrders.length === 0) return;
+      mergeOrdersIntoState(remoteOrders, shouldRingOnNew);
+    },
+    [scriptUrl, mergeOrdersIntoState]
+  );
 
   useEffect(() => {
     if (scriptUrl) {
@@ -517,10 +968,15 @@ export default function App() {
     return () => window.removeEventListener('online', onOnline);
   }, [scriptUrl, syncAllBackendNow]);
 
-  const showToast = useCallback((type: 'ok' | 'err', text: string) => {
-    setScanToast({ type, text });
-    window.setTimeout(() => setScanToast(null), 2600);
-  }, []);
+  // Background 10s fallback poll from Google Sheets when POS or Customer menu is open
+  useEffect(() => {
+    if (!scriptUrl || !scriptUrl.trim()) return;
+    if (viewScreen !== 'staff-pos' && viewScreen !== 'customer') return;
+    const timer = window.setInterval(() => {
+      refreshOnlineOrdersNow(viewScreen === 'staff-pos');
+    }, 10000);
+    return () => window.clearInterval(timer);
+  }, [scriptUrl, viewScreen, refreshOnlineOrdersNow]);
 
   // Barcode scan handler with 0.8s anti-duplicate lock
   const lastBarcodeScanRef = useRef<{ code: string; time: number }>({ code: '', time: 0 });
@@ -583,7 +1039,7 @@ export default function App() {
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName?.toLowerCase();
       if (tag === 'input' || tag === 'textarea') return;
-      if (checkoutState.step !== 'idle' || settingsOpen || guideOpen || dressingOpen || watchOpen || faqModalOpen) return;
+      if (checkoutState.step !== 'idle' || settingsOpen || guideOpen || dressingOpen || watchOpen || faqModalOpen || exitScannerOpen) return;
 
       const now = Date.now();
       if (now - lastKeyTime > 120) {
@@ -606,7 +1062,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [viewScreen, currentUser, checkoutState.step, settingsOpen, guideOpen, dressingOpen, watchOpen, faqModalOpen, handleBarcodeLookup]);
+  }, [viewScreen, currentUser, checkoutState.step, settingsOpen, guideOpen, dressingOpen, watchOpen, faqModalOpen, exitScannerOpen, handleBarcodeLookup]);
 
   // Silent Void Logging for removing item / clearing bill
   const handleRemoveBillItem = (index: number) => {
@@ -641,8 +1097,58 @@ export default function App() {
     setBillItems([]);
   };
 
+  // Donate Barcode + Photo from Home Page (Strict No-Duplicate + Auto-Sync to Backend & POS)
+  const handleDonateBarcodeProduct = useCallback(
+    (incoming: MenuItem): { ok: boolean; reason?: string } => {
+      const cleanCode = incoming.barcode.trim();
+      if (!cleanCode) {
+        return {
+          ok: false,
+          reason: tx('กรุณาระบุเลขบาร์โค้ดก่อนบันทึกค่ะ', 'Please provide a barcode.'),
+        };
+      }
+
+      const duplicate = menuItems.find(
+        (m) => m.barcode.trim() !== '' && m.barcode.trim() === cleanCode
+      );
+      if (duplicate) {
+        return {
+          ok: false,
+          reason: tx(
+            `มีเลขบาร์โค้ด "${cleanCode}" (${duplicate.name}) อยู่ในระบบแล้ว ระบบจึงปฏิเสธและไม่เขียนทับข้อมูลเดิมค่ะ`,
+            `Barcode "${cleanCode}" (${duplicate.name}) already exists. Duplicates and overwrites are blocked.`
+          ),
+        };
+      }
+
+      const donatedItem: MenuItem = {
+        ...incoming,
+        barcode: cleanCode,
+        status: 'พร้อมขาย',
+        stockMode: 'unlimited',
+      };
+
+      const nextItems = [...menuItems, donatedItem];
+      setMenuItems(nextItems);
+      saveCachedMenu(nextItems);
+      syncBroadcastRef.current.broadcastConfigUpdated({ menu: nextItems });
+
+      if (scriptUrl && scriptUrl.trim()) {
+        postToSheets(scriptUrl, 'ตั้งค่าเมนู', { menu: nextItems });
+      }
+
+      return { ok: true };
+    },
+    [menuItems, scriptUrl, tx]
+  );
+
   // Complete Payment & Send to Google Sheets (แยกแท็บ ขายจริง_หน้าร้าน / ขายจริง_ครัวแม่วัง / ทดสอบระบบ)
-  const finalizeSalePayment = useCallback(async () => {
+  const finalizeSalePayment = useCallback(async (slipImageUrl?: string, bankAccountLabel?: string) => {
+    const cleanSlip =
+      typeof slipImageUrl === 'string' && slipImageUrl.startsWith('data:image/')
+        ? slipImageUrl
+        : undefined;
+    const cleanBank = bankAccountLabel?.trim() || '';
     const actorUser: StaffUser = currentUser || { name: 'ลูกค้าสั่งเอง', role: 'cashier' };
     playSuccessChime();
 
@@ -667,15 +1173,48 @@ export default function App() {
     const billId = `B${Date.now().toString().slice(-6)}`;
     const activeShopName = isKrua ? foodShopNameTh : shopNameTh;
 
-    const deliveryStr = checkoutState.deliveryInfo
-      ? `${checkoutState.deliveryInfo.deliveryType}${
-          checkoutState.deliveryInfo.customerName ? ` - ${checkoutState.deliveryInfo.customerName}` : ''
-        }${checkoutState.deliveryInfo.dropPoint ? ` (${checkoutState.deliveryInfo.dropPoint})` : ''}`
+    const cleanTable = checkoutState.deliveryInfo?.tableNumber?.trim() || '';
+    const cleanCustomerName = checkoutState.deliveryInfo?.customerName?.trim() || '';
+    const cleanDropPoint = checkoutState.deliveryInfo?.dropPoint?.trim() || '';
+    const chosenType = checkoutState.deliveryInfo?.deliveryType;
+
+    const baseDeliveryStr = chosenType
+      ? chosenType === 'ทานนี้'
+        ? `ทานนี้${cleanTable ? ` (โต๊ะที่ ${cleanTable})` : ''}${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}`
+        : chosenType === 'กลับบ้าน'
+          ? `กลับบ้าน${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}`
+          : `${chosenType}${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}${cleanDropPoint ? ` (${cleanDropPoint})` : ''}`
       : 'หน้าร้าน';
+
+    const deliveryWithBank = cleanBank
+      ? `${baseDeliveryStr} [เข้า: ${cleanBank}]`
+      : baseDeliveryStr;
+
+    const issuedTimestamp = new Date().toLocaleString('th-TH');
+    const issuedIso = new Date().toISOString();
+
+    const issuedReceipt: ReceiptSlipRecord | null = receiptSlipEnabled
+      ? {
+          billId,
+          orgCode,
+          issuedAt: issuedIso,
+          timestamp: issuedTimestamp,
+          shopType: isKrua ? 'krua' : 'store',
+          shopName: activeShopName,
+          mode: modeLabel,
+          staffName: actorUser.name,
+          paymentMethod: checkoutState.method,
+          bankAccountLabel: cleanBank || undefined,
+          deliveryInfo: baseDeliveryStr,
+          items: activeItems.map((item) => ({ ...item })),
+          totalAmount: totalAmt,
+          totalStars,
+        }
+      : null;
 
     saveSaleHistoryLog({
       id: billId,
-      timestamp: new Date().toLocaleString('th-TH'),
+      timestamp: issuedTimestamp,
       dateKey: getTodayDateKey(),
       shopType: isKrua ? 'krua' : 'store',
       shopName: activeShopName,
@@ -685,27 +1224,46 @@ export default function App() {
       totalAmount: totalAmt,
       totalStars,
       itemsSummary,
-      deliveryInfo: deliveryStr,
+      deliveryInfo: deliveryWithBank,
+      slipImageUrl: cleanSlip,
     });
 
+    if (issuedReceipt) {
+      mergeReceiptsIntoState([issuedReceipt]);
+      syncBroadcastRef.current.broadcastReceiptCreated(issuedReceipt);
+    }
+
     if (isKrua && menuCart.length > 0) {
-      setQueueOrders((prev) => {
-        const nextQueueNo = prev.length > 0 ? Math.max(...prev.map((q) => q.queueNo)) + 1 : 1;
-        return [
-          ...prev,
-          {
-            queueNo: nextQueueNo,
-            orderId: billId,
-            items: menuCart,
-            totalAmount: totalAmt,
-            totalStars,
-            deliveryType: checkoutState.deliveryInfo?.deliveryType || 'รับเองที่ร้าน',
-            customerName: checkoutState.deliveryInfo?.customerName,
-            dropPoint: checkoutState.deliveryInfo?.dropPoint,
-            createdAt: new Date().toISOString(),
-            status: 'กำลังทำ',
-          },
-        ];
+      const nextQueueNo = queueOrders.length > 0 ? Math.max(...queueOrders.map((q) => q.queueNo)) + 1 : 1;
+      const resolvedDropPoint =
+        chosenType === 'ทานนี้' && cleanTable
+          ? `โต๊ะที่ ${cleanTable}`
+          : cleanDropPoint || undefined;
+      const newOrder: CustomerQueueOrder = {
+        queueNo: nextQueueNo,
+        orderId: billId,
+        items: menuCart,
+        totalAmount: totalAmt,
+        totalStars,
+        deliveryType: chosenType || 'ทานนี้',
+        tableNumber: cleanTable || undefined,
+        paymentMethod: checkoutState.method,
+        customerName: cleanCustomerName || undefined,
+        dropPoint: resolvedDropPoint,
+        slipImageUrl: cleanSlip,
+        accepted: Boolean(currentUser),
+        createdAt: issuedIso,
+        status: 'กำลังทำ',
+      };
+      knownOrderIdsRef.current.add(newOrder.orderId);
+      setQueueOrders((prev) => [...prev, newOrder]);
+      syncBroadcastRef.current.broadcastOrderCreated(newOrder);
+
+      postToSheets(scriptUrl, 'ออเดอร์ออนไลน์', {
+        ...newOrder,
+        bankAccount: cleanBank,
+        slipImageUrl: cleanSlip || '',
+        slipStatus: cleanSlip ? 'แนบสลิปแล้ว' : 'ไม่มีสลิป',
       });
     }
 
@@ -715,10 +1273,13 @@ export default function App() {
       shopBrand: activeShopName,
       staffName: actorUser.name,
       paymentMethod: checkoutState.method,
+      bankAccount: cleanBank,
       totalAmount: totalAmt,
       totalStars,
       itemsSummary,
-      deliveryInfo: deliveryStr,
+      deliveryInfo: cleanSlip ? `${deliveryWithBank} [แนบสลิปแล้ว]` : deliveryWithBank,
+      slipStatus: cleanSlip ? 'แนบสลิปแล้ว' : 'ไม่มีสลิป',
+      slipImageUrl: cleanSlip || '',
     });
 
     if (checkoutState.source === 'calculator') {
@@ -731,8 +1292,76 @@ export default function App() {
       ...prev,
       step: 'success',
       stars: totalStars,
+      receipt: issuedReceipt,
     }));
-  }, [currentUser, checkoutState, billItems, menuCart, isTestMode, scriptUrl, foodShopNameTh, shopNameTh]);
+  }, [currentUser, checkoutState, billItems, menuCart, queueOrders, isTestMode, scriptUrl, foodShopNameTh, shopNameTh, receiptSlipEnabled, orgCode, mergeReceiptsIntoState]);
+
+  const handleMarkReceiptExited = useCallback(
+    (billId: string) => {
+      const key = billId.trim().toUpperCase();
+      const exitedAt = new Date().toISOString();
+      const exitedBy = currentUser?.name || 'พนักงาน';
+      setReceipts((prev) =>
+        prev.map((r) =>
+          r.billId.toUpperCase() === key && !r.exitedAt
+            ? { ...r, exitedAt, exitedBy }
+            : r
+        )
+      );
+      markSaleHistoryExited(key, exitedAt, exitedBy);
+      syncBroadcastRef.current.broadcastReceiptExited(key, exitedAt, exitedBy);
+    },
+    [currentUser]
+  );
+
+  const handleToggleReceiptSlip = useCallback(
+    (nextVal: boolean) => {
+      setReceiptSlipEnabled(nextVal);
+      localStorage.setItem(KEYS.RECEIPT_SLIP, String(nextVal));
+      pushConfigSnapshotRef.current({ receiptSlipEnabled: String(nextVal) }, true);
+    },
+    []
+  );
+
+  const handleAcceptQueueOrder = useCallback(
+    (orderId: string) => {
+      playScanSuccess();
+      setQueueOrders((prev) =>
+        prev.map((q) => (q.orderId === orderId ? { ...q, accepted: true } : q))
+      );
+      syncBroadcastRef.current.broadcastOrderUpdated(orderId, { accepted: true });
+      if (scriptUrl && scriptUrl.trim()) {
+        postToSheets(scriptUrl, 'ออเดอร์ออนไลน์', {
+          actionType: 'updateOrderStatus',
+          orderId,
+          accepted: true,
+        });
+      }
+    },
+    [scriptUrl]
+  );
+
+  const handleMarkQueueDone = useCallback(
+    (orderId: string) => {
+      playSoftClick();
+      setQueueOrders((prev) =>
+        prev.map((q) => (q.orderId === orderId ? { ...q, accepted: true, status: 'เสร็จแล้ว' } : q))
+      );
+      syncBroadcastRef.current.broadcastOrderUpdated(orderId, {
+        accepted: true,
+        status: 'เสร็จแล้ว',
+      });
+      if (scriptUrl && scriptUrl.trim()) {
+        postToSheets(scriptUrl, 'ออเดอร์ออนไลน์', {
+          actionType: 'updateOrderStatus',
+          orderId,
+          accepted: true,
+          status: 'เสร็จแล้ว',
+        });
+      }
+    },
+    [scriptUrl]
+  );
 
   // 1. WELCOME LANDING SCREEN (หน้าแรกต้อนรับลูกค้า + ป้ายโฆษณา + ถาม-ตอบด่วน)
   if (viewScreen === 'welcome') {
@@ -749,6 +1378,8 @@ export default function App() {
           faqBubbleText={faqBubbleText}
           logoUrl={logoUrl}
           outfits={bearOutfits}
+          menuItems={menuItems}
+          onDonateProduct={handleDonateBarcodeProduct}
           onEnterCustomerOrder={() => {
             setPosMode('menu');
             setViewScreen('customer');
@@ -878,6 +1509,7 @@ export default function App() {
             outfits={bearOutfits}
             foodShopNameTh={foodShopNameTh}
             foodShopNameEn={foodShopNameEn}
+            isMerchantView={false}
             onAddMenuItem={(item, options) => {
               const tasteNote = options?.tasteNote?.trim() || undefined;
               const qtyToAdd = options?.qty && options.qty > 0 ? options.qty : 1;
@@ -922,12 +1554,7 @@ export default function App() {
                 deliveryInfo,
               });
             }}
-            onMarkQueueDone={(orderId) => {
-              playSoftClick();
-              setQueueOrders((prev) =>
-                prev.map((q) => (q.orderId === orderId ? { ...q, status: 'เสร็จแล้ว' } : q))
-              );
-            }}
+            onMarkQueueDone={handleMarkQueueDone}
           />
         </main>
 
@@ -946,22 +1573,26 @@ export default function App() {
           amount={checkoutState.amount}
           items={menuCart}
           onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle' }))}
-          onConfirmPaid={finalizeSalePayment}
+          onConfirmPaid={() => finalizeSalePayment()}
         />
 
         <QrPaymentModal
           isOpen={checkoutState.step === 'qr'}
           amount={checkoutState.amount}
           items={menuCart}
-          promptPayId={promptPayId}
-          promptPayAccountName={promptPayAccountName}
+          promptPayId={activePaymentAccount?.promptPayId || activePaymentAccount?.accountNumber || promptPayId}
+          promptPayAccountName={activePaymentAccount?.accountName || promptPayAccountName}
+          paymentAccounts={activePaymentAccount ? [activePaymentAccount] : paymentAccounts}
+          activePaymentAccountId={activePaymentAccountId}
           shopNameTh={foodShopNameTh}
           enableAutoPaymentCheck={enableAutoPaymentCheck}
           scriptUrl={scriptUrl}
           mascotMode="krua"
           outfits={bearOutfits}
+          allowSlipUpload={true}
+          lineShopUrl={lineShopUrl}
           onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle' }))}
-          onConfirmPaid={finalizeSalePayment}
+          onConfirmPaid={(slipUrl, bankLabel) => finalizeSalePayment(slipUrl, bankLabel)}
         />
 
         <PaymentSuccessOverlay
@@ -975,7 +1606,14 @@ export default function App() {
           scriptUrl={scriptUrl}
           mascotMode="krua"
           outfits={bearOutfits}
-          onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle' }))}
+          receiptSlipEnabled={receiptSlipEnabled}
+          receiptData={
+            checkoutState.receipt
+              ? receipts.find((r) => r.billId === checkoutState.receipt?.billId) ||
+                checkoutState.receipt
+              : null
+          }
+          onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle', receipt: null }))}
         />
       </div>
     );
@@ -1199,6 +1837,66 @@ export default function App() {
                         {lang === 'en' ? foodShopNameEn : foodShopNameTh} / {tx('สั่งอาหาร', 'Orders')}
                       </button>
                     </div>
+                  );
+                case 'exitScanner': {
+                  const waitingExitCount = receipts.filter((r) => !r.exitedAt).length;
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isReorderMode) return;
+                        playSoftClick();
+                        setExitScannerOpen(true);
+                      }}
+                      className="px-3.5 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                      style={{
+                        backgroundColor: 'var(--accent-soft)',
+                        borderColor: 'var(--accent-border)',
+                        color: 'var(--accent-text)',
+                      }}
+                    >
+                      <ScanLine className="w-4 h-4" />
+                      {tx('สแกนสลิปผ่านประตู', 'Exit Slip Scan')}
+                      {waitingExitCount > 0 && (
+                        <span className="px-1.5 py-0.5 rounded-lg bg-emerald-600 text-white text-[10px] font-num">
+                          {waitingExitCount}
+                        </span>
+                      )}
+                    </button>
+                  );
+                }
+                case 'receiptSlipToggle':
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (isReorderMode) return;
+                        playSoftClick();
+                        const next = !receiptSlipEnabled;
+                        handleToggleReceiptSlip(next);
+                        showToast(
+                          'ok',
+                          next
+                            ? tx('เปิดการออกใบสลิป & QR ผ่านประตูแล้วค่ะ', 'Receipt slips & exit QR resumed')
+                            : tx('หยุดการให้ใบสลิปชั่วคราวแล้วค่ะ', 'Receipt slip issuance paused')
+                        );
+                      }}
+                      className="px-3.5 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                      style={{
+                        backgroundColor: receiptSlipEnabled ? '#ECFDF5' : '#FFF1F2',
+                        borderColor: receiptSlipEnabled ? '#A7F3D0' : '#FECDD3',
+                        color: receiptSlipEnabled ? '#065F46' : '#9F1239',
+                      }}
+                    >
+                      {receiptSlipEnabled ? (
+                        <Receipt className="w-4 h-4" />
+                      ) : (
+                        <PauseCircle className="w-4 h-4" />
+                      )}
+                      {receiptSlipEnabled
+                        ? tx('ใบสลิป: เปิดแจก', 'Slips: ON')
+                        : tx('หยุดให้ใบสลิป', 'Slips: PAUSED')}
+                    </button>
                   );
                 case 'watchShop': {
                   const momWaiting = callPeers.some((p) => p.role === 'shop');
@@ -1496,7 +2194,37 @@ export default function App() {
       )}
 
       {/* Main POS Workspace */}
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 pt-6">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 pt-6 space-y-5">
+        {posMode === 'calculator' &&
+          queueOrders.some((q) => q.status === 'กำลังทำ' && !q.accepted) && (
+            <div
+              className="rounded-2xl border-2 px-4 py-3 flex flex-wrap items-center justify-between gap-3"
+              style={{
+                backgroundColor: 'var(--accent-soft)',
+                borderColor: 'var(--accent-primary)',
+                color: 'var(--accent-text)',
+              }}
+            >
+              <div className="text-sm font-bold">
+                {tx(
+                  `มีออเดอร์ออนไลน์ใหม่ ${queueOrders.filter((q) => q.status === 'กำลังทำ' && !q.accepted).length} คิว รอตรวจสลิปและกดรับออเดอร์ค่ะ`,
+                  `${queueOrders.filter((q) => q.status === 'กำลังทำ' && !q.accepted).length} new online order(s) waiting for slip check & acceptance`
+                )}
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  playSoftClick();
+                  setPosMode('menu');
+                }}
+                className="px-4 py-2 rounded-xl text-xs sm:text-sm font-bold text-white cursor-pointer"
+                style={{ backgroundColor: 'var(--accent-primary)' }}
+              >
+                {tx('ดูออเดอร์ & ตรวจสลิป', 'Inspect Orders & Slips')}
+              </button>
+            </div>
+          )}
+
         {posMode === 'calculator' ? (
           <CalculatorPOS
             billItems={billItems}
@@ -1547,6 +2275,7 @@ export default function App() {
             outfits={bearOutfits}
             foodShopNameTh={foodShopNameTh}
             foodShopNameEn={foodShopNameEn}
+            isMerchantView={true}
             onAddMenuItem={(item, options) => {
               const tasteNote = options?.tasteNote?.trim() || undefined;
               const qtyToAdd = options?.qty && options.qty > 0 ? options.qty : 1;
@@ -1591,12 +2320,9 @@ export default function App() {
                 deliveryInfo,
               });
             }}
-            onMarkQueueDone={(orderId) => {
-              playSoftClick();
-              setQueueOrders((prev) =>
-                prev.map((q) => (q.orderId === orderId ? { ...q, status: 'เสร็จแล้ว' } : q))
-              );
-            }}
+            onAcceptQueueOrder={handleAcceptQueueOrder}
+            onMarkQueueDone={handleMarkQueueDone}
+            onRefreshOrdersFromSheets={scriptUrl.trim() ? () => refreshOnlineOrdersNow(false) : undefined}
           />
         )}
       </main>
@@ -1614,28 +2340,40 @@ export default function App() {
         menuItems={menuItems}
       />
 
+      {/* Exit Gate Slip Scanner Modal (สำหรับคุณแม่และพนักงานตรวจสลิปออกประตู) */}
+      <ExitSlipScannerModal
+        isOpen={exitScannerOpen}
+        onClose={() => setExitScannerOpen(false)}
+        receipts={receipts}
+        staffName={activeUser.name}
+        onMarkReceiptExited={handleMarkReceiptExited}
+      />
+
       {/* Payment Modals */}
       <CashPaymentModal
         isOpen={checkoutState.step === 'cash'}
         amount={checkoutState.amount}
         items={checkoutState.source === 'calculator' ? billItems : menuCart}
         onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle' }))}
-        onConfirmPaid={finalizeSalePayment}
+        onConfirmPaid={() => finalizeSalePayment()}
       />
 
       <QrPaymentModal
         isOpen={checkoutState.step === 'qr'}
         amount={checkoutState.amount}
         items={checkoutState.source === 'calculator' ? billItems : menuCart}
-        promptPayId={promptPayId}
-        promptPayAccountName={promptPayAccountName}
+        promptPayId={activePaymentAccount?.promptPayId || activePaymentAccount?.accountNumber || promptPayId}
+        promptPayAccountName={activePaymentAccount?.accountName || promptPayAccountName}
+        paymentAccounts={paymentAccounts}
+        activePaymentAccountId={activePaymentAccountId}
+        onSelectPaymentAccount={handleSelectActivePaymentAccount}
         shopNameTh={checkoutState.source === 'menu' ? foodShopNameTh : shopNameTh}
         enableAutoPaymentCheck={enableAutoPaymentCheck}
         scriptUrl={scriptUrl}
         mascotMode={checkoutState.source === 'menu' ? 'krua' : 'kids'}
         outfits={bearOutfits}
         onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle' }))}
-        onConfirmPaid={finalizeSalePayment}
+        onConfirmPaid={(slipUrl, bankLabel) => finalizeSalePayment(slipUrl, bankLabel)}
       />
 
       <PaymentSuccessOverlay
@@ -1649,7 +2387,14 @@ export default function App() {
         scriptUrl={scriptUrl}
         mascotMode={checkoutState.source === 'menu' ? 'krua' : 'kids'}
         outfits={bearOutfits}
-        onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle' }))}
+        receiptSlipEnabled={receiptSlipEnabled}
+        receiptData={
+          checkoutState.receipt
+            ? receipts.find((r) => r.billId === checkoutState.receipt?.billId) ||
+              checkoutState.receipt
+            : null
+        }
+        onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle', receipt: null }))}
       />
 
       {/* Dressing Room Modal (5 Family Bears) */}
@@ -1673,8 +2418,8 @@ export default function App() {
         roomId={orgCode}
         staffName={activeUser.name}
         shopNameTh={shopNameTh}
-        promptPayId={promptPayId}
-        promptPayAccountName={promptPayAccountName}
+        promptPayId={activePaymentAccount?.promptPayId || activePaymentAccount?.accountNumber || promptPayId}
+        promptPayAccountName={activePaymentAccount?.accountName || promptPayAccountName}
         peersInRoom={callPeers}
       />
 
@@ -1692,31 +2437,47 @@ export default function App() {
           onChangeShopNameTh={(val) => {
             setShopNameTh(val);
             localStorage.setItem(KEYS.SHOP_NAME_TH, val);
+            pushConfigSnapshotRef.current({ shopNameTh: val });
           }}
           shopNameEn={shopNameEn}
           onChangeShopNameEn={(val) => {
             setShopNameEn(val);
             localStorage.setItem(KEYS.SHOP_NAME_EN, val);
+            pushConfigSnapshotRef.current({ shopNameEn: val });
           }}
           foodShopNameTh={foodShopNameTh}
           onChangeFoodShopNameTh={(val) => {
             setFoodShopNameTh(val);
             localStorage.setItem(KEYS.FOOD_NAME_TH, val);
+            pushConfigSnapshotRef.current({ foodShopNameTh: val });
           }}
           foodShopNameEn={foodShopNameEn}
           onChangeFoodShopNameEn={(val) => {
             setFoodShopNameEn(val);
             localStorage.setItem(KEYS.FOOD_NAME_EN, val);
+            pushConfigSnapshotRef.current({ foodShopNameEn: val });
           }}
           promptPayId={promptPayId}
           onChangePromptPayId={(val) => {
             setPromptPayId(val);
             localStorage.setItem(KEYS.PROMPTPAY, val);
+            pushConfigSnapshotRef.current({ promptPayId: val });
           }}
           promptPayAccountName={promptPayAccountName}
           onChangePromptPayAccountName={(val) => {
             setPromptPayAccountName(val);
             localStorage.setItem(KEYS.PROMPTPAY_NAME, val);
+            pushConfigSnapshotRef.current({ promptPayAccountName: val });
+          }}
+          paymentAccounts={paymentAccounts}
+          activePaymentAccountId={activePaymentAccountId}
+          onChangePaymentAccounts={handleChangePaymentAccounts}
+          onSelectActivePaymentAccount={handleSelectActivePaymentAccount}
+          lineShopUrl={lineShopUrl}
+          onChangeLineShopUrl={(val) => {
+            setLineShopUrl(val);
+            localStorage.setItem(KEYS.LINE_SHOP_URL, val);
+            pushConfigSnapshotRef.current({ lineShopUrl: val });
           }}
           scriptUrl={scriptUrl}
           onChangeScriptUrl={(val) => {
@@ -1727,52 +2488,73 @@ export default function App() {
           onChangeRewardNotice={(val) => {
             setRewardNotice(val);
             localStorage.setItem(KEYS.REWARD_NOTICE, val);
+            pushConfigSnapshotRef.current({ rewardNotice: val });
           }}
           promoTitle={promoTitle}
           onChangePromoTitle={(val) => {
             setPromoTitle(val);
             localStorage.setItem(KEYS.PROMO_TITLE, val);
+            pushConfigSnapshotRef.current({ promoTitle: val });
           }}
           promoSubtitle={promoSubtitle}
           onChangePromoSubtitle={(val) => {
             setPromoSubtitle(val);
             localStorage.setItem(KEYS.PROMO_SUBTITLE, val);
+            pushConfigSnapshotRef.current({ promoSubtitle: val });
           }}
           faqBubbleText={faqBubbleText}
           onChangeFaqBubbleText={(val) => {
             setFaqBubbleText(val);
             localStorage.setItem(KEYS.FAQ_BUBBLE, val);
+            pushConfigSnapshotRef.current({ faqBubbleText: val });
           }}
           faqModalTitle={faqModalTitle}
           onChangeFaqModalTitle={(val) => {
             setFaqModalTitle(val);
             localStorage.setItem(KEYS.FAQ_TITLE, val);
+            pushConfigSnapshotRef.current({ faqModalTitle: val });
           }}
           faqModalSubtitle={faqModalSubtitle}
           onChangeFaqModalSubtitle={(val) => {
             setFaqModalSubtitle(val);
             localStorage.setItem(KEYS.FAQ_SUBTITLE, val);
+            pushConfigSnapshotRef.current({ faqModalSubtitle: val });
           }}
           faqs={faqs}
           onChangeFaqs={(next) => {
             setFaqs(next);
             saveCachedFaqs(next);
+            syncBroadcastRef.current.broadcastConfigUpdated({ faqs: next });
+            if (scriptUrl && scriptUrl.trim()) {
+              postToSheets(scriptUrl, 'ถามตอบลูกค้า', { faqs: next });
+            }
           }}
           rewardOffers={rewardOffers}
           onChangeRewardOffers={(next) => {
             setRewardOffers(next);
             saveCachedRewardOffers(next);
+            syncBroadcastRef.current.broadcastConfigUpdated({ rewardOffers: next });
+            if (scriptUrl && scriptUrl.trim()) {
+              postToSheets(scriptUrl, 'โปรโมชันแลกดาว', { rewardOffers: next });
+            }
           }}
           menuItems={menuItems}
           onChangeMenuItems={(next) => {
             setMenuItems(next);
             saveCachedMenu(next);
+            syncBroadcastRef.current.broadcastConfigUpdated({ menu: next });
+            if (scriptUrl && scriptUrl.trim()) {
+              postToSheets(scriptUrl, 'ตั้งค่าเมนู', { menu: next });
+            }
           }}
           onlineOrderEnabled={onlineOrderEnabled}
           onToggleOnlineOrder={(val) => {
             setOnlineOrderEnabled(val);
             localStorage.setItem(KEYS.ONLINE_ORDER, String(val));
+            pushConfigSnapshotRef.current({ onlineOrderEnabled: String(val) }, true);
           }}
+          receiptSlipEnabled={receiptSlipEnabled}
+          onToggleReceiptSlip={handleToggleReceiptSlip}
           isTestMode={isTestMode}
           onToggleTestMode={(val) => {
             setIsTestMode(val);
@@ -1782,6 +2564,7 @@ export default function App() {
           onToggleAutoPaymentCheck={(val) => {
             setEnableAutoPaymentCheck(val);
             localStorage.setItem(KEYS.AUTO_CHECK, String(val));
+            pushConfigSnapshotRef.current({ enableAutoPaymentCheck: String(val) }, true);
           }}
           onSyncAllNow={syncAllBackendNow}
           onFlushQueueNow={() => flushOfflineQueue(scriptUrl)}

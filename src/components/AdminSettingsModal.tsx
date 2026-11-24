@@ -1,11 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Barcode,
+  Building2,
   Camera,
   Check,
   Copy,
   Database,
   Download,
+  FileImage,
   FileSpreadsheet,
   Gift,
   ImagePlus,
@@ -13,6 +15,7 @@ import {
   MessageCircleQuestion,
   Palette,
   Plus,
+  QrCode,
   RefreshCw,
   Search,
   ShieldAlert,
@@ -22,8 +25,18 @@ import {
   Wifi,
   X,
 } from 'lucide-react';
-import { FaqItem, MenuItem, RewardOffer, StaffUser, THEME_OPTIONS, ThemeId } from '../config/shopConfig';
-import { compressProductImageFile } from '../utils/imageUpload';
+import {
+  BANK_PRESETS,
+  FaqItem,
+  MenuItem,
+  PaymentAccount,
+  RewardOffer,
+  StaffUser,
+  THEME_OPTIONS,
+  ThemeId,
+} from '../config/shopConfig';
+import { compressProductImageFile, compressSlipImageFile } from '../utils/imageUpload';
+import { isValidPromptPayTarget } from '../utils/promptpay';
 import {
   translateCategory,
   translateMenuName,
@@ -70,6 +83,12 @@ interface AdminSettingsModalProps {
   onChangePromptPayId: (val: string) => void;
   promptPayAccountName: string;
   onChangePromptPayAccountName: (val: string) => void;
+  paymentAccounts: PaymentAccount[];
+  activePaymentAccountId: string;
+  onChangePaymentAccounts: (next: PaymentAccount[]) => void;
+  onSelectActivePaymentAccount: (id: string) => void;
+  lineShopUrl: string;
+  onChangeLineShopUrl: (val: string) => void;
   scriptUrl: string;
   onChangeScriptUrl: (val: string) => void;
   rewardNotice: string;
@@ -92,6 +111,8 @@ interface AdminSettingsModalProps {
   onChangeMenuItems: (next: MenuItem[]) => void;
   onlineOrderEnabled: boolean;
   onToggleOnlineOrder: (val: boolean) => void;
+  receiptSlipEnabled: boolean;
+  onToggleReceiptSlip: (val: boolean) => void;
   isTestMode: boolean;
   onToggleTestMode: (val: boolean) => void;
   enableAutoPaymentCheck: boolean;
@@ -120,6 +141,12 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   onChangePromptPayId,
   promptPayAccountName,
   onChangePromptPayAccountName,
+  paymentAccounts,
+  activePaymentAccountId,
+  onChangePaymentAccounts,
+  onSelectActivePaymentAccount,
+  lineShopUrl,
+  onChangeLineShopUrl,
   scriptUrl,
   onChangeScriptUrl,
   rewardNotice,
@@ -142,6 +169,8 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   onChangeMenuItems,
   onlineOrderEnabled,
   onToggleOnlineOrder,
+  receiptSlipEnabled,
+  onToggleReceiptSlip,
   isTestMode,
   onToggleTestMode,
   enableAutoPaymentCheck,
@@ -155,6 +184,24 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   const [copiedLine, setCopiedLine] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [syncing, setSyncing] = useState(false);
+  const [previewBill, setPreviewBill] = useState<{
+    id: string;
+    timestamp: string;
+    totalAmount: number;
+    staffName: string;
+    deliveryInfo?: string;
+    slipImageUrl: string;
+  } | null>(null);
+
+  // Add/Edit Payment Bank Account state
+  const [showAddAccountForm, setShowAddAccountForm] = useState(false);
+  const [editingAccountId, setEditingAccountId] = useState<string | null>(null);
+  const [bankNameInput, setBankNameInput] = useState('ธนาคารกสิกรไทย (KBank)');
+  const [bankAccountNoInput, setBankAccountNoInput] = useState('');
+  const [bankAccountNameInput, setBankAccountNameInput] = useState(promptPayAccountName || '');
+  const [bankPromptPayInput, setBankPromptPayInput] = useState('');
+  const [bankQrImageInput, setBankQrImageInput] = useState('');
+  const bankQrInputRef = useRef<HTMLInputElement>(null);
 
   // Add FAQ state
   const [newQuestion, setNewQuestion] = useState('');
@@ -562,6 +609,11 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
           foodShopNameEn,
           promptPayId,
           promptPayAccountName,
+          paymentAccountsJson: JSON.stringify(
+            paymentAccounts.map((a) => ({ ...a, qrImageUrl: a.qrImageUrl || undefined }))
+          ),
+          activePaymentAccountId,
+          lineShopUrl,
           rewardNotice,
           promoTitle,
           promoSubtitle,
@@ -569,6 +621,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
           faqModalTitle,
           faqModalSubtitle,
           onlineOrderEnabled: String(onlineOrderEnabled),
+          receiptSlipEnabled: String(receiptSlipEnabled),
           enableAutoPaymentCheck: String(enableAutoPaymentCheck),
         },
       }),
@@ -613,6 +666,11 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
         foodShopNameEn,
         promptPayId,
         promptPayAccountName,
+        paymentAccountsJson: JSON.stringify(
+          paymentAccounts.map((a) => ({ ...a, qrImageUrl: a.qrImageUrl || undefined }))
+        ),
+        activePaymentAccountId,
+        lineShopUrl,
         rewardNotice,
         promoTitle,
         promoSubtitle,
@@ -620,6 +678,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
         faqModalTitle,
         faqModalSubtitle,
         onlineOrderEnabled: String(onlineOrderEnabled),
+        receiptSlipEnabled: String(receiptSlipEnabled),
         enableAutoPaymentCheck: String(enableAutoPaymentCheck),
       },
     });
@@ -854,6 +913,29 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                 >
                   <div>
                     <p className="font-bold text-sm" style={{ color: 'var(--text-main)' }}>
+                      {tx('แจกใบสลิป & QR สแกนผ่านประตูหลังชำระเงิน', 'Issue Receipt Slip & Exit Gate QR After Payment')}
+                    </p>
+                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                      {tx(
+                        'ปิดชั่วคราวได้หากไม่ต้องการออกใบสลิป (สามารถกดหยุด/เปิดจากแถบปุ่มด้านบนได้เลยค่ะ)',
+                        'Pause slip issuance anytime (also toggleable from the top POS toolbar)'
+                      )}
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={receiptSlipEnabled}
+                    onChange={(e) => onToggleReceiptSlip(e.target.checked)}
+                    className="w-6 h-6 accent-emerald-600 cursor-pointer"
+                  />
+                </label>
+
+                <label
+                  className="flex items-center justify-between gap-4 p-4 rounded-2xl border cursor-pointer"
+                  style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                >
+                  <div>
+                    <p className="font-bold text-sm" style={{ color: 'var(--text-main)' }}>
                       {tx('เช็กยอดเงินเข้าอัตโนมัติทุก 3 วินาที', 'Auto-Check QR Payment Every 3 Seconds')}
                     </p>
                     <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
@@ -924,33 +1006,446 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                     />
                   </div>
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-sm font-semibold mb-1">
-                      {tx('เบอร์พร้อมเพย์รับเงิน (PromptPay ID)', 'PromptPay Receiver ID')}
-                    </label>
-                    <input
-                      type="text"
-                      value={promptPayId}
-                      onChange={(e) => onChangePromptPayId(e.target.value)}
-                      placeholder={tx('เช่น 0837596411', 'e.g. 0837596411')}
-                      className="w-full h-11 px-3.5 rounded-2xl border font-num"
-                      style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
-                    />
+                {/* Multi-Bank Receiving Channels Manager */}
+                <div
+                  className="rounded-2xl border p-4 space-y-3.5"
+                  style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--accent-border)' }}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h3 className="text-sm sm:text-base font-bold flex items-center gap-1.5" style={{ color: 'var(--text-main)' }}>
+                        <Building2 className="w-4 h-4" style={{ color: 'var(--accent-primary)' }} />
+                        {tx('ช่องทางการรับเงิน / บัญชีธนาคาร', 'Receiving Bank & PromptPay Accounts')}
+                      </h3>
+                      <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                        {tx(
+                          'เพิ่มได้หลายธนาคาร และกดเลือกบัญชีที่ต้องการใช้รับเงินในร้านได้ทันทีค่ะ',
+                          'Add multiple bank accounts and choose which one receives payments.'
+                        )}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playSoftClick();
+                        setEditingAccountId(null);
+                        setBankNameInput('ธนาคารกสิกรไทย (KBank)');
+                        setBankAccountNoInput('');
+                        setBankAccountNameInput(promptPayAccountName || 'คำวัง พวงมาลา');
+                        setBankPromptPayInput('');
+                        setBankQrImageInput('');
+                        setShowAddAccountForm((prev) => !prev);
+                      }}
+                      className="px-3.5 py-2 rounded-xl font-bold text-xs text-white flex items-center gap-1.5 cursor-pointer shrink-0"
+                      style={{ backgroundColor: 'var(--accent-primary)' }}
+                    >
+                      <Plus className="w-4 h-4" />
+                      {tx('เพิ่มบัญชีรับเงิน', 'Add Account')}
+                    </button>
                   </div>
-                  <div>
-                    <label className="block text-sm font-semibold mb-1">
-                      {tx('ชื่อบัญชีพร้อมเพย์', 'PromptPay Account Name')}
-                    </label>
-                    <input
-                      type="text"
-                      value={promptPayAccountName}
-                      onChange={(e) => onChangePromptPayAccountName(e.target.value)}
-                      placeholder={tx('เช่น คำวัง พวงมาลา', 'e.g. คำวัง พวงมาลา')}
-                      className="w-full h-11 px-3.5 rounded-2xl border text-sm"
-                      style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
-                    />
+
+                  {/* Saved Accounts List */}
+                  <div className="space-y-2.5">
+                    {paymentAccounts.map((acc) => {
+                      const isActive = acc.id === activePaymentAccountId;
+                      const preset = BANK_PRESETS.find((b) => b.name === acc.bankName);
+                      const hasQrReady =
+                        Boolean(acc.qrImageUrl) ||
+                        isValidPromptPayTarget(acc.promptPayId) ||
+                        isValidPromptPayTarget(acc.accountNumber);
+
+                      return (
+                        <div
+                          key={acc.id}
+                          className="rounded-2xl border-2 p-3 flex flex-wrap items-center justify-between gap-3"
+                          style={{
+                            backgroundColor: isActive ? 'var(--accent-soft)' : 'var(--bg-card)',
+                            borderColor: isActive ? 'var(--accent-primary)' : 'var(--border-soft)',
+                          }}
+                        >
+                          <div className="min-w-0 flex-1 space-y-1">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span
+                                className="px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                                style={{
+                                  backgroundColor: preset?.badgeColor || '#E5E7EB',
+                                  color: preset?.textColor || '#1F2937',
+                                }}
+                              >
+                                {acc.bankName}
+                              </span>
+                              {hasQrReady && (
+                                <span
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[10px] font-bold"
+                                  style={{ backgroundColor: 'var(--bg-subtle)', color: 'var(--accent-text)' }}
+                                >
+                                  <QrCode className="w-3 h-3" />
+                                  {acc.qrImageUrl
+                                    ? tx('มีรูป QR', 'QR Uploaded')
+                                    : tx('สร้าง PromptPay QR', 'Auto QR')}
+                                </span>
+                              )}
+                            </div>
+                            <p className="font-num font-bold text-sm sm:text-base" style={{ color: 'var(--text-main)' }}>
+                              {acc.accountNumber}
+                            </p>
+                            <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                              {tx('ชื่อบัญชี:', 'Account Name:')} {acc.accountName}
+                            </p>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                playSoftClick();
+                                onSelectActivePaymentAccount(acc.id);
+                                onChangePromptPayId(acc.promptPayId || acc.accountNumber);
+                                onChangePromptPayAccountName(acc.accountName);
+                                setStatusMsg(
+                                  tx(
+                                    `เลือกใช้บัญชี "${acc.bankName} (${acc.accountNumber})" รับเงินเรียบร้อยแล้วค่ะ`,
+                                    `Switched active receiving account to "${acc.bankName} (${acc.accountNumber})".`
+                                  )
+                                );
+                              }}
+                              className="px-3 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 cursor-pointer"
+                              style={{
+                                backgroundColor: isActive ? '#16A34A' : 'var(--bg-canvas)',
+                                border: isActive ? 'none' : '1px solid var(--border-soft)',
+                                color: isActive ? '#FFFFFF' : 'var(--accent-text)',
+                              }}
+                            >
+                              {isActive && <Check className="w-3.5 h-3.5" />}
+                              {isActive
+                                ? tx('กำลังรับเงินบัญชีนี้', 'Active Account')
+                                : tx('เลือกใช้บัญชีนี้', 'Use This Account')}
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                playSoftClick();
+                                setEditingAccountId(acc.id);
+                                setBankNameInput(acc.bankName);
+                                setBankAccountNoInput(acc.accountNumber);
+                                setBankAccountNameInput(acc.accountName);
+                                setBankPromptPayInput(acc.promptPayId || '');
+                                setBankQrImageInput(acc.qrImageUrl || '');
+                                setShowAddAccountForm(true);
+                              }}
+                              className="px-2.5 py-1.5 rounded-xl border text-xs font-semibold cursor-pointer"
+                              style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                            >
+                              {tx('แก้ไข', 'Edit')}
+                            </button>
+
+                            {paymentAccounts.length > 1 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  playSoftClick();
+                                  const next = paymentAccounts.filter((item) => item.id !== acc.id);
+                                  onChangePaymentAccounts(next);
+                                  if (isActive && next[0]) {
+                                    onSelectActivePaymentAccount(next[0].id);
+                                    onChangePromptPayId(next[0].promptPayId || next[0].accountNumber);
+                                    onChangePromptPayAccountName(next[0].accountName);
+                                  }
+                                }}
+                                className="w-8 h-8 rounded-xl flex items-center justify-center cursor-pointer"
+                                style={{ backgroundColor: 'var(--pastel-pink)', color: 'var(--pastel-pink-text)' }}
+                                aria-label={tx(`ลบบัญชี ${acc.bankName}`, `Delete ${acc.bankName}`)}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
+
+                  {/* Add / Edit Bank Account Form */}
+                  {showAddAccountForm && (
+                    <div
+                      className="rounded-2xl border-2 p-4 space-y-3"
+                      style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--accent-primary)' }}
+                    >
+                      <div className="flex items-center justify-between">
+                        <p className="text-sm font-bold" style={{ color: 'var(--accent-text)' }}>
+                          {editingAccountId
+                            ? tx('แก้ไขบัญชีรับเงิน', 'Edit Receiving Account')
+                            : tx('+ เพิ่มบัญชีธนาคาร / ช่องทางรับเงินใหม่', '+ Add New Receiving Bank Account')}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowAddAccountForm(false);
+                            setEditingAccountId(null);
+                          }}
+                          className="text-xs underline cursor-pointer"
+                          style={{ color: 'var(--text-muted)' }}
+                        >
+                          {tx('ยกเลิก', 'Cancel')}
+                        </button>
+                      </div>
+
+                      {/* Quick Bank Chips */}
+                      <div className="space-y-1.5">
+                        <p className="text-xs font-semibold" style={{ color: 'var(--text-muted)' }}>
+                          {tx('เลือกธนาคารด่วน หรือพิมพ์ชื่อธนาคารเองด้านล่าง:', 'Quick-pick bank or enter below:')}
+                        </p>
+                        <div className="flex flex-wrap gap-1.5">
+                          {BANK_PRESETS.map((bank) => {
+                            const selected = bankNameInput === bank.name;
+                            return (
+                              <button
+                                key={bank.name}
+                                type="button"
+                                onClick={() => {
+                                  playSoftClick();
+                                  setBankNameInput(bank.name);
+                                }}
+                                className="px-2.5 py-1 rounded-xl border text-[11px] font-bold cursor-pointer"
+                                style={{
+                                  backgroundColor: selected ? bank.badgeColor : 'var(--bg-canvas)',
+                                  borderColor: selected ? bank.textColor : 'var(--border-soft)',
+                                  color: selected ? bank.textColor : 'var(--text-main)',
+                                }}
+                              >
+                                {bank.name.split(' (')[0]}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        <div>
+                          <label className="block text-xs font-semibold mb-1">
+                            {tx('ชื่อธนาคาร / ช่องทาง *', 'Bank / Channel Name *')}
+                          </label>
+                          <input
+                            type="text"
+                            value={bankNameInput}
+                            onChange={(e) => setBankNameInput(e.target.value)}
+                            placeholder={tx('เช่น ธนาคารกสิกรไทย (KBank)', 'e.g. KBank / SCB / PromptPay')}
+                            className="w-full h-10 px-3 rounded-xl border text-xs sm:text-sm"
+                            style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold mb-1">
+                            {tx('เลขบัญชีธนาคาร หรือ เบอร์พร้อมเพย์ *', 'Account Number / PromptPay ID *')}
+                          </label>
+                          <input
+                            type="text"
+                            value={bankAccountNoInput}
+                            onChange={(e) => setBankAccountNoInput(e.target.value)}
+                            placeholder={tx('เช่น 123-4-56789-0 หรือ 0837596411', 'e.g. 123-4-56789-0 or 0837596411')}
+                            className="w-full h-10 px-3 rounded-xl border text-xs sm:text-sm font-num"
+                            style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold mb-1">
+                            {tx('ชื่อบัญชี *', 'Account Holder Name *')}
+                          </label>
+                          <input
+                            type="text"
+                            value={bankAccountNameInput}
+                            onChange={(e) => setBankAccountNameInput(e.target.value)}
+                            placeholder={tx('เช่น คำวัง พวงมาลา', 'e.g. คำวัง พวงมาลา')}
+                            className="w-full h-10 px-3 rounded-xl border text-xs sm:text-sm"
+                            style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold mb-1">
+                            {tx('เบอร์พร้อมเพย์สร้าง QR (ถ้าผูกไว้ - ไม่บังคับ)', 'Linked PromptPay ID for QR (Optional)')}
+                          </label>
+                          <input
+                            type="text"
+                            value={bankPromptPayInput}
+                            onChange={(e) => setBankPromptPayInput(e.target.value)}
+                            placeholder={tx('ใส่เบอร์มือถือ/เลขบัตร 13 หลักหากต้องการ QR อัตโนมัติ', 'Mobile/13-digit ID for auto QR')}
+                            className="w-full h-10 px-3 rounded-xl border text-xs sm:text-sm font-num"
+                            style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                          />
+                        </div>
+                      </div>
+
+                      {/* Optional Custom Bank QR Image Upload */}
+                      <input
+                        ref={bankQrInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          e.target.value = '';
+                          if (!file) return;
+                          playSoftClick();
+                          try {
+                            const compressed = await compressSlipImageFile(file, 480);
+                            setBankQrImageInput(compressed);
+                          } catch {
+                            setStatusMsg(tx('ไม่สามารถอ่านรูป QR ได้ค่ะ', 'Could not read QR image.'));
+                          }
+                        }}
+                      />
+                      <div
+                        className="rounded-xl border p-2.5 flex flex-wrap items-center justify-between gap-2.5"
+                        style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                      >
+                        <div className="flex items-center gap-2.5">
+                          {bankQrImageInput ? (
+                            <img
+                              src={bankQrImageInput}
+                              alt="Bank QR"
+                              className="w-12 h-12 rounded-lg object-contain bg-white border"
+                              style={{ borderColor: 'var(--accent-primary)' }}
+                            />
+                          ) : (
+                            <div
+                              className="w-12 h-12 rounded-lg border border-dashed flex items-center justify-center"
+                              style={{ borderColor: 'var(--border-soft)', color: 'var(--text-muted)' }}
+                            >
+                              <QrCode className="w-5 h-5" />
+                            </div>
+                          )}
+                          <div>
+                            <p className="text-xs font-bold" style={{ color: 'var(--text-main)' }}>
+                              {tx('อัปโหลดรูป QR ของธนาคารนี้ (ไม่บังคับ)', 'Upload Bank QR Image (Optional)')}
+                            </p>
+                            <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                              {tx('บันทึกรูป QR รับเงินจากแอปธนาคารมาใส่ได้เลยค่ะ', 'Upload QR picture saved from your bank app')}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              playSoftClick();
+                              bankQrInputRef.current?.click();
+                            }}
+                            className="px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1 cursor-pointer"
+                            style={{ backgroundColor: 'var(--accent-soft)', borderColor: 'var(--accent-border)', color: 'var(--accent-text)' }}
+                          >
+                            <ImagePlus className="w-3.5 h-3.5" />
+                            {bankQrImageInput ? tx('เปลี่ยนรูป QR', 'Change QR') : tx('เลือกรูป QR', 'Upload QR')}
+                          </button>
+                          {bankQrImageInput && (
+                            <button
+                              type="button"
+                              onClick={() => setBankQrImageInput('')}
+                              className="px-2.5 py-1.5 rounded-xl text-xs font-bold cursor-pointer"
+                              style={{ backgroundColor: 'var(--pastel-pink)', color: 'var(--pastel-pink-text)' }}
+                            >
+                              {tx('ลบรูป', 'Remove')}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="flex justify-end gap-2 pt-1">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playSoftClick();
+                            const cleanBank = bankNameInput.trim();
+                            const cleanNo = bankAccountNoInput.trim();
+                            const cleanHolder = bankAccountNameInput.trim();
+                            if (!cleanBank || !cleanNo || !cleanHolder) {
+                              setStatusMsg(
+                                tx(
+                                  'กรุณากรอกชื่อธนาคาร เลขบัญชี/เบอร์พร้อมเพย์ และชื่อบัญชีให้ครบนะคะ',
+                                  'Please enter Bank Name, Account Number, and Account Holder Name.'
+                                )
+                              );
+                              return;
+                            }
+
+                            if (editingAccountId) {
+                              const next = paymentAccounts.map((acc) =>
+                                acc.id === editingAccountId
+                                  ? {
+                                      ...acc,
+                                      bankName: cleanBank,
+                                      accountNumber: cleanNo,
+                                      accountName: cleanHolder,
+                                      promptPayId: bankPromptPayInput.trim() || undefined,
+                                      qrImageUrl: bankQrImageInput || undefined,
+                                    }
+                                  : acc
+                              );
+                              onChangePaymentAccounts(next);
+                              if (activePaymentAccountId === editingAccountId) {
+                                onChangePromptPayId(bankPromptPayInput.trim() || cleanNo);
+                                onChangePromptPayAccountName(cleanHolder);
+                              }
+                              setStatusMsg(tx(`อัปเดตบัญชี "${cleanBank}" เรียบร้อยแล้วค่ะ`, `Updated account "${cleanBank}".`));
+                            } else {
+                              const newAcc: PaymentAccount = {
+                                id: `acc_${Date.now()}`,
+                                bankName: cleanBank,
+                                accountNumber: cleanNo,
+                                accountName: cleanHolder,
+                                promptPayId: bankPromptPayInput.trim() || undefined,
+                                qrImageUrl: bankQrImageInput || undefined,
+                              };
+                              const next = [...paymentAccounts, newAcc];
+                              onChangePaymentAccounts(next);
+                              onSelectActivePaymentAccount(newAcc.id);
+                              onChangePromptPayId(newAcc.promptPayId || newAcc.accountNumber);
+                              onChangePromptPayAccountName(newAcc.accountName);
+                              setStatusMsg(
+                                tx(
+                                  `เพิ่มบัญชี "${cleanBank}" และตั้งเป็นบัญชีรับเงินหลักแล้วค่ะ`,
+                                  `Added "${cleanBank}" and set as active receiving account.`
+                                )
+                              );
+                            }
+
+                            setShowAddAccountForm(false);
+                            setEditingAccountId(null);
+                          }}
+                          className="px-4 h-10 rounded-xl font-bold text-xs sm:text-sm text-white flex items-center gap-1.5 cursor-pointer"
+                          style={{ backgroundColor: '#16A34A' }}
+                        >
+                          <Check className="w-4 h-4" />
+                          {editingAccountId
+                            ? tx('บันทึกการแก้ไขบัญชี', 'Save Account Changes')
+                            : tx('บันทึก & เลือกใช้บัญชีนี้เลย', 'Save & Activate Account')}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div>
+                  <label className="block text-sm font-semibold mb-1">
+                    {tx(
+                      'ลิงก์ LINE ร้าน / LINE OA (สำหรับลูกค้ากดส่งสลิปในหน้าสั่งอาหารเอง)',
+                      'Shop LINE / LINE OA Link (for customer slip sending)'
+                    )}
+                  </label>
+                  <input
+                    type="url"
+                    value={lineShopUrl}
+                    onChange={(e) => onChangeLineShopUrl(e.target.value)}
+                    placeholder="https://line.me/ti/p/..."
+                    className="w-full h-11 px-3.5 rounded-2xl border text-sm font-mono"
+                    style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                  />
+                  <p className="text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>
+                    {tx(
+                      'ลูกค้าสามารถแนบและส่งสลิปผ่านหน้าเว็บโดยตรงเป็นหลัก และหากใส่ลิงก์ LINE ไว้ ปุ่มสำรอง "ส่งสลิปทาง LINE" จะลิงก์มาที่แชตร้านโดยตรงค่ะ',
+                      'Customers upload slips directly on the web as the main channel; adding your LINE URL connects the small backup "Send via LINE" button.'
+                    )}
+                  </p>
                 </div>
               </div>
             </div>
@@ -1722,11 +2217,48 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                           className="rounded-xl border p-2.5 flex items-center justify-between gap-2 text-xs"
                           style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
                         >
-                          <div className="min-w-0">
-                            <p className="font-semibold truncate">[{s.mode}] {s.itemsSummary}</p>
+                          <div className="min-w-0 flex-1 space-y-0.5">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <p className="font-semibold truncate">[{s.mode}] {s.itemsSummary}</p>
+                              {s.slipImageUrl && (
+                                <span
+                                  className="px-1.5 py-0.5 rounded-md text-[10px] font-bold shrink-0"
+                                  style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
+                                >
+                                  {tx('แนบสลิปแล้ว', 'Slip Attached')}
+                                </span>
+                              )}
+                            </div>
                             <p style={{ color: 'var(--text-muted)' }}>{s.timestamp} · {s.staffName}</p>
                           </div>
-                          <span className="font-num font-bold shrink-0">฿{s.totalAmount}</span>
+                          <div className="flex items-center gap-2 shrink-0">
+                            {s.slipImageUrl && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  playSoftClick();
+                                  setPreviewBill({
+                                    id: s.id,
+                                    timestamp: s.timestamp,
+                                    totalAmount: s.totalAmount,
+                                    staffName: s.staffName,
+                                    deliveryInfo: s.deliveryInfo,
+                                    slipImageUrl: s.slipImageUrl!,
+                                  });
+                                }}
+                                className="px-2.5 py-1 rounded-lg border text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                                style={{
+                                  backgroundColor: 'var(--accent-soft)',
+                                  borderColor: 'var(--accent-primary)',
+                                  color: 'var(--accent-text)',
+                                }}
+                              >
+                                <FileImage className="w-3 h-3" />
+                                {tx('ดูรูปสลิป', 'View Slip')}
+                              </button>
+                            )}
+                            <span className="font-num font-bold">฿{s.totalAmount}</span>
+                          </div>
                         </div>
                       ))}
                     </div>
@@ -2295,6 +2827,61 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
           </button>
         </div>
       </div>
+
+      {/* Slip Image Viewer Lightbox */}
+      {previewBill && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          onClick={() => setPreviewBill(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-3xl border shadow-2xl overflow-hidden"
+            style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="flex items-center justify-between px-4 py-3 border-b"
+              style={{ borderColor: 'var(--border-soft)' }}
+            >
+              <div>
+                <h4 className="font-bold text-sm" style={{ color: 'var(--text-main)' }}>
+                  {tx('หลักฐานสลิปโอนเงิน', 'Transfer Slip Proof')}
+                </h4>
+                <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                  #{previewBill.id} · ฿{previewBill.totalAmount.toLocaleString('th-TH')} · {previewBill.timestamp}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewBill(null)}
+                className="w-9 h-9 rounded-xl border flex items-center justify-center cursor-pointer"
+                style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                aria-label={tx('ปิดหน้าต่าง', 'Close')}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 flex justify-center bg-stone-50">
+              <img
+                src={previewBill.slipImageUrl}
+                alt={tx('สลิปโอนเงินลูกค้า', 'Customer transfer slip')}
+                className="max-h-[68vh] w-auto rounded-2xl object-contain border border-stone-200"
+              />
+            </div>
+            {previewBill.deliveryInfo && (
+              <div
+                className="px-4 py-2.5 border-t text-xs flex items-center justify-between"
+                style={{ borderColor: 'var(--border-soft)', backgroundColor: 'var(--bg-canvas)', color: 'var(--text-muted)' }}
+              >
+                <span>{previewBill.deliveryInfo}</span>
+                <span className="font-bold" style={{ color: '#166534' }}>
+                  {tx('แนบสลิปแล้ว', 'Slip Attached')}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

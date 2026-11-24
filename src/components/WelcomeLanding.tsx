@@ -17,8 +17,9 @@ import {
   translateRewardNotice,
   useLang,
 } from '../config/i18n';
-import { SHOP_CONFIG } from '../config/shopConfig';
+import { MenuItem, SHOP_CONFIG } from '../config/shopConfig';
 import { playSoftClick } from '../utils/sound';
+import { BarcodeDonationHub } from './BarcodeDonationHub';
 import { BearGangMascot } from './BearGangMascot';
 
 interface WelcomeLandingProps {
@@ -32,6 +33,8 @@ interface WelcomeLandingProps {
   faqBubbleText: string;
   logoUrl: string | null;
   outfits: BearFamilyOutfits;
+  menuItems: MenuItem[];
+  onDonateProduct: (item: MenuItem) => { ok: boolean; reason?: string };
   onEnterCustomerOrder: () => void;
   onOpenMemberRewards: () => void;
   onEnterStaffLogin: () => void;
@@ -49,6 +52,8 @@ export const WelcomeLanding: React.FC<WelcomeLandingProps> = ({
   faqBubbleText,
   logoUrl,
   outfits,
+  menuItems,
+  onDonateProduct,
   onEnterCustomerOrder,
   onOpenMemberRewards,
   onEnterStaffLogin,
@@ -340,6 +345,9 @@ export const WelcomeLanding: React.FC<WelcomeLandingProps> = ({
             </div>
           </div>
         </section>
+
+        {/* Public Community Barcode Search & Photo Donation Catalog (No Login Required) */}
+        <BarcodeDonationHub menuItems={menuItems} onDonateProduct={onDonateProduct} />
       </div>
     </div>
   );

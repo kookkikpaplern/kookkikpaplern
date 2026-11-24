@@ -100,6 +100,35 @@ export function playSuccessChime(): void {
   }
 }
 
+export function playNewOrderBell(): void {
+  try {
+    const ctx = getAudioContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    // Clear shop counter "ding-dong!" double chime
+    const chimes = [
+      { freq: 880, delay: 0, dur: 0.35 },
+      { freq: 1174.66, delay: 0.16, dur: 0.45 },
+      { freq: 880, delay: 0.42, dur: 0.3 },
+      { freq: 1174.66, delay: 0.56, dur: 0.5 },
+    ];
+    chimes.forEach((c) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(c.freq, now + c.delay);
+      gain.gain.setValueAtTime(0.22, now + c.delay);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + c.delay + c.dur);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + c.delay);
+      osc.stop(now + c.delay + c.dur + 0.02);
+    });
+  } catch {
+    // Ignore
+  }
+}
+
 export function speakMessage(text: string, lang: 'th' | 'en' = 'th'): void {
   try {
     if (typeof window === 'undefined' || !('speechSynthesis' in window)) return;

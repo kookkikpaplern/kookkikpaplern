@@ -1,11 +1,15 @@
 import React, { useMemo, useState } from 'react';
 import {
   Banknote,
+  Check,
   CheckCircle2,
   Coffee,
+  Eye,
+  FileImage,
   Minus,
   Plus,
   QrCode,
+  RefreshCw,
   ShoppingBag,
   Star,
   Trash2,
@@ -36,14 +40,22 @@ interface CustomerMenuPOSProps {
   outfits: BearFamilyOutfits;
   foodShopNameTh: string;
   foodShopNameEn: string;
+  isMerchantView?: boolean;
   onAddMenuItem: (item: MenuItem, options?: { qty?: number; tasteNote?: string }) => void;
   onChangeQty: (itemId: string, delta: number) => void;
   onClearCart: () => void;
   onSubmitOrderPayment: (
     method: 'cash' | 'qr',
-    deliveryInfo: { deliveryType: 'รับเองที่ร้าน' | 'ให้พ่อไปส่ง'; customerName: string; dropPoint: string }
+    deliveryInfo: {
+      deliveryType: 'ทานนี้' | 'กลับบ้าน' | 'รับเองที่ร้าน' | 'ให้พ่อไปส่ง';
+      tableNumber?: string;
+      customerName: string;
+      dropPoint: string;
+    }
   ) => void;
+  onAcceptQueueOrder?: (orderId: string) => void;
   onMarkQueueDone: (orderId: string) => void;
+  onRefreshOrdersFromSheets?: () => Promise<void>;
 }
 
 function isDrinkOrSnackCategory(category: string): boolean {
@@ -70,19 +82,27 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
   outfits,
   foodShopNameTh,
   foodShopNameEn,
+  isMerchantView = false,
   onAddMenuItem,
   onChangeQty,
   onClearCart,
   onSubmitOrderPayment,
+  onAcceptQueueOrder,
   onMarkQueueDone,
+  onRefreshOrdersFromSheets,
 }) => {
   const { lang, tx } = useLang();
   // แยกปุ่มสลับหมวดอาหารกับเครื่องดื่มชัดเจน
   const [mainGroup, setMainGroup] = useState<'food' | 'drink'>('food');
   const [subCategory, setSubCategory] = useState('ทั้งหมด');
-  const [deliveryType, setDeliveryType] = useState<'รับเองที่ร้าน' | 'ให้พ่อไปส่ง'>('รับเองที่ร้าน');
+  const [deliveryType, setDeliveryType] = useState<'ทานนี้' | 'กลับบ้าน' | 'ให้พ่อไปส่ง'>('ทานนี้');
+  const [tableNumber, setTableNumber] = useState('');
   const [customerName, setCustomerName] = useState('');
   const [dropPoint, setDropPoint] = useState('');
+  const [orderFormError, setOrderFormError] = useState('');
+  const tableInputRef = React.useRef<HTMLInputElement>(null);
+  const customerNameInputRef = React.useRef<HTMLInputElement>(null);
+  const dropPointInputRef = React.useRef<HTMLInputElement>(null);
 
   // Modal เลือกรสชาติสำหรับเมนูอาหาร
   const [selectedFoodItem, setSelectedFoodItem] = useState<MenuItem | null>(null);
@@ -90,23 +110,30 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
   const [sweetLevel, setSweetLevel] = useState<string>('');
   const [customNote, setCustomNote] = useState<string>('');
   const [modalQty, setModalQty] = useState<number>(1);
+  const [previewOrder, setPreviewOrder] = useState<CustomerQueueOrder | null>(null);
+  const [isRefreshingOrders, setIsRefreshingOrders] = useState(false);
 
-  const hasFoodItems = useMemo(
-    () => menuItems.some((item) => !isDrinkOrSnackCategory(item.category)),
+  const orderableItems = useMemo(
+    () => menuItems.filter((item) => item.price > 0),
     [menuItems]
   );
+
+  const hasFoodItems = useMemo(
+    () => orderableItems.some((item) => !isDrinkOrSnackCategory(item.category)),
+    [orderableItems]
+  );
   const hasDrinkItems = useMemo(
-    () => menuItems.some((item) => isDrinkOrSnackCategory(item.category)),
-    [menuItems]
+    () => orderableItems.some((item) => isDrinkOrSnackCategory(item.category)),
+    [orderableItems]
   );
   const hasSnackItems = useMemo(
     () =>
-      menuItems.some(
+      orderableItems.some(
         (item) =>
           item.category.toLowerCase().includes('ขนม') ||
           item.category.toLowerCase().includes('snack')
       ),
-    [menuItems]
+    [orderableItems]
   );
 
   const effectiveGroup: 'food' | 'drink' =
@@ -117,11 +144,11 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
         : mainGroup;
 
   const groupItems = useMemo(() => {
-    return menuItems.filter((item) => {
+    return orderableItems.filter((item) => {
       const isDrink = isDrinkOrSnackCategory(item.category);
       return effectiveGroup === 'drink' ? isDrink : !isDrink;
     });
-  }, [menuItems, effectiveGroup]);
+  }, [orderableItems, effectiveGroup]);
 
   const subCategories = useMemo(() => {
     const set = new Set<string>(['ทั้งหมด']);
@@ -456,6 +483,176 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                 </ul>
               )}
 
+              {/* รูปแบบการรับอาหาร: ทานนี้ / กลับบ้าน / ให้พ่อไปส่ง + ช่องโต๊ะที่ */}
+              <div className="border-t pt-3 space-y-2.5" style={{ borderColor: 'var(--border-soft)' }}>
+                <p className="text-xs font-bold" style={{ color: 'var(--text-main)' }}>
+                  {tx('เลือกรูปแบบการรับอาหาร', 'Select Dining Option')}
+                </p>
+
+                <div className="grid grid-cols-3 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSoftClick();
+                      setDeliveryType('ทานนี้');
+                      setOrderFormError('');
+                    }}
+                    className="py-2.5 px-2 rounded-2xl border-2 text-xs sm:text-sm font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
+                    style={{
+                      backgroundColor: deliveryType === 'ทานนี้' ? 'var(--accent-primary)' : 'var(--bg-canvas)',
+                      borderColor: deliveryType === 'ทานนี้' ? 'var(--accent-primary)' : 'var(--border-soft)',
+                      color: deliveryType === 'ทานนี้' ? '#FFFFFF' : 'var(--text-main)',
+                    }}
+                  >
+                    <Utensils className="w-3.5 h-3.5 shrink-0" />
+                    {tx('ทานนี้', 'Dine-in')}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSoftClick();
+                      setDeliveryType('กลับบ้าน');
+                      setOrderFormError('');
+                    }}
+                    className="py-2.5 px-2 rounded-2xl border-2 text-xs sm:text-sm font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
+                    style={{
+                      backgroundColor: deliveryType === 'กลับบ้าน' ? 'var(--accent-primary)' : 'var(--bg-canvas)',
+                      borderColor: deliveryType === 'กลับบ้าน' ? 'var(--accent-primary)' : 'var(--border-soft)',
+                      color: deliveryType === 'กลับบ้าน' ? '#FFFFFF' : 'var(--text-main)',
+                    }}
+                  >
+                    <ShoppingBag className="w-3.5 h-3.5 shrink-0" />
+                    {tx('กลับบ้าน', 'Takeaway')}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSoftClick();
+                      setDeliveryType('ให้พ่อไปส่ง');
+                      setOrderFormError('');
+                    }}
+                    className="py-2.5 px-2 rounded-2xl border-2 text-xs sm:text-sm font-bold flex items-center justify-center gap-1 cursor-pointer transition-all active:scale-95"
+                    style={{
+                      backgroundColor: deliveryType === 'ให้พ่อไปส่ง' ? 'var(--accent-primary)' : 'var(--bg-canvas)',
+                      borderColor: deliveryType === 'ให้พ่อไปส่ง' ? 'var(--accent-primary)' : 'var(--border-soft)',
+                      color: deliveryType === 'ให้พ่อไปส่ง' ? '#FFFFFF' : 'var(--text-main)',
+                    }}
+                  >
+                    <Truck className="w-3.5 h-3.5 shrink-0" />
+                    {tx('ให้พ่อไปส่ง', 'Delivery')}
+                  </button>
+                </div>
+
+                {deliveryType === 'ทานนี้' && (
+                  <div className="space-y-1">
+                    <div
+                      className="flex items-center rounded-2xl border-2 overflow-hidden transition-colors"
+                      style={{
+                        backgroundColor: 'var(--bg-canvas)',
+                        borderColor:
+                          orderFormError && !tableNumber.trim()
+                            ? '#E11D48'
+                            : tableNumber.trim()
+                              ? 'var(--accent-primary)'
+                              : 'var(--accent-border)',
+                      }}
+                    >
+                      <span
+                        className="px-3.5 py-2.5 font-bold text-sm sm:text-base shrink-0 select-none border-r"
+                        style={{
+                          backgroundColor: 'var(--accent-soft)',
+                          color: 'var(--accent-text)',
+                          borderColor: 'var(--accent-border)',
+                        }}
+                      >
+                        {tx('โต๊ะที่', 'Table')}
+                      </span>
+                      <input
+                        ref={tableInputRef}
+                        type="text"
+                        value={tableNumber}
+                        onChange={(e) => {
+                          setTableNumber(e.target.value);
+                          if (orderFormError) setOrderFormError('');
+                        }}
+                        placeholder={tx('พิมพ์เลขโต๊ะ เช่น 7', 'e.g. 7')}
+                        aria-label={tx('โต๊ะที่', 'Table number')}
+                        className="w-full h-11 px-3.5 text-base font-num font-bold bg-transparent focus:outline-none"
+                        style={{ color: 'var(--text-main)' }}
+                      />
+                    </div>
+                    <p className="text-[11px] px-1" style={{ color: 'var(--text-muted)' }}>
+                      {tx('เติมเลขโต๊ะในช่องว่างได้เลยค่ะ (เช่น 7)', 'Enter your table number in the blank (e.g. 7)')}
+                    </p>
+                  </div>
+                )}
+
+                {deliveryType === 'กลับบ้าน' && (
+                  <input
+                    type="text"
+                    value={customerName}
+                    onChange={(e) => setCustomerName(e.target.value)}
+                    placeholder={tx('ชื่อผู้สั่ง / ชื่อเล่น (ไม่บังคับ)', 'Your name (optional)')}
+                    className="w-full h-11 px-3.5 rounded-xl border text-sm focus:outline-none"
+                    style={{
+                      backgroundColor: 'var(--bg-canvas)',
+                      borderColor: 'var(--border-soft)',
+                      color: 'var(--text-main)',
+                    }}
+                  />
+                )}
+
+                {deliveryType === 'ให้พ่อไปส่ง' && (
+                  <div className="space-y-2">
+                    <input
+                      ref={customerNameInputRef}
+                      type="text"
+                      value={customerName}
+                      onChange={(e) => {
+                        setCustomerName(e.target.value);
+                        if (orderFormError) setOrderFormError('');
+                      }}
+                      placeholder={tx('ชื่อผู้สั่ง * (เช่น น้องมิ้น)', 'Your name * (e.g. Mint)')}
+                      className="w-full h-11 px-3.5 rounded-xl border-2 text-sm focus:outline-none"
+                      style={{
+                        backgroundColor: 'var(--bg-canvas)',
+                        borderColor:
+                          orderFormError && !customerName.trim() ? '#E11D48' : 'var(--border-soft)',
+                        color: 'var(--text-main)',
+                      }}
+                    />
+                    <input
+                      ref={dropPointInputRef}
+                      type="text"
+                      value={dropPoint}
+                      onChange={(e) => {
+                        setDropPoint(e.target.value);
+                        if (orderFormError) setOrderFormError('');
+                      }}
+                      placeholder={tx('จุดส่ง * (เช่น หน้าตึก 2 / บ้านเลขที่)', 'Drop-off spot * (e.g. Building 2 / House No.)')}
+                      className="w-full h-11 px-3.5 rounded-xl border-2 text-sm focus:outline-none"
+                      style={{
+                        backgroundColor: 'var(--bg-canvas)',
+                        borderColor:
+                          orderFormError && !dropPoint.trim() ? '#E11D48' : 'var(--border-soft)',
+                        color: 'var(--text-main)',
+                      }}
+                    />
+                  </div>
+                )}
+
+                {orderFormError && (
+                  <div
+                    className="rounded-xl px-3 py-2 text-xs font-bold"
+                    style={{ backgroundColor: '#FFE4E6', color: '#BE123C' }}
+                  >
+                    {orderFormError}
+                  </div>
+                )}
+              </div>
+
               {/* Total & Pay */}
               <div className="border-t pt-3 space-y-3" style={{ borderColor: 'var(--border-soft)' }}>
                 <div className="flex items-baseline justify-between">
@@ -467,37 +664,83 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                   </span>
                 </div>
 
-                <div className="grid grid-cols-2 gap-2.5">
-                  <button
-                    type="button"
-                    disabled={cartTotal <= 0 || !onlineOrderEnabled}
-                    onClick={() => onSubmitOrderPayment('cash', { deliveryType, customerName, dropPoint })}
-                    className="h-14 rounded-2xl font-bold text-white flex items-center justify-center gap-2 cursor-pointer disabled:opacity-45 transition-transform active:scale-95"
-                    style={{ backgroundColor: 'var(--accent-primary)' }}
-                  >
-                    <Banknote className="w-5 h-5" />
-                    {tx('เงินสด', 'Cash')}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={cartTotal <= 0 || !onlineOrderEnabled}
-                    onClick={() => onSubmitOrderPayment('qr', { deliveryType, customerName, dropPoint })}
-                    className="h-14 rounded-2xl border font-bold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-45 transition-transform active:scale-95"
-                    style={{
-                      backgroundColor: 'var(--pastel-blue)',
-                      borderColor: 'var(--border-soft)',
-                      color: 'var(--pastel-blue-text)',
-                    }}
-                  >
-                    <QrCode className="w-5 h-5" />
-                    {tx('สแกน QR', 'Scan QR')}
-                  </button>
-                </div>
+                {(() => {
+                  const handlePayClick = (method: 'cash' | 'qr') => {
+                    if (!isMerchantView) {
+                      if (deliveryType === 'ทานนี้' && !tableNumber.trim()) {
+                        setOrderFormError(
+                          tx(
+                            'กรุณากรอกเลขโต๊ะในช่อง "โต๊ะที่" ก่อนกดชำระเงินนะคะ (เช่น 7)',
+                            'Please enter your table number before checking out (e.g. 7).'
+                          )
+                        );
+                        tableInputRef.current?.focus();
+                        return;
+                      }
+                      if (deliveryType === 'ให้พ่อไปส่ง' && !customerName.trim()) {
+                        setOrderFormError(
+                          tx(
+                            'กรุณากรอกชื่อผู้สั่งก่อนนะคะ พ่อจะได้เรียกชื่อถูกค่ะ',
+                            'Please enter your name so Papa Bear knows who ordered.'
+                          )
+                        );
+                        customerNameInputRef.current?.focus();
+                        return;
+                      }
+                      if (deliveryType === 'ให้พ่อไปส่ง' && !dropPoint.trim()) {
+                        setOrderFormError(
+                          tx(
+                            'กรุณากรอกจุดส่งอาหารก่อนนะคะ พ่อจะได้ไปส่งถูกที่ค่ะ',
+                            'Please enter your drop-off spot for delivery.'
+                          )
+                        );
+                        dropPointInputRef.current?.focus();
+                        return;
+                      }
+                    }
+                    setOrderFormError('');
+                    onSubmitOrderPayment(method, {
+                      deliveryType,
+                      tableNumber: deliveryType === 'ทานนี้' ? tableNumber.trim() : undefined,
+                      customerName,
+                      dropPoint,
+                    });
+                  };
+
+                  return (
+                    <div className="grid grid-cols-2 gap-2.5">
+                      <button
+                        type="button"
+                        disabled={cartTotal <= 0 || !onlineOrderEnabled}
+                        onClick={() => handlePayClick('cash')}
+                        className="h-14 rounded-2xl font-bold text-white flex items-center justify-center gap-2 cursor-pointer disabled:opacity-45 transition-transform active:scale-95"
+                        style={{ backgroundColor: 'var(--accent-primary)' }}
+                      >
+                        <Banknote className="w-5 h-5" />
+                        {tx('เงินสด', 'Cash')}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={cartTotal <= 0 || !onlineOrderEnabled}
+                        onClick={() => handlePayClick('qr')}
+                        className="h-14 rounded-2xl border font-bold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-45 transition-transform active:scale-95"
+                        style={{
+                          backgroundColor: 'var(--pastel-blue)',
+                          borderColor: 'var(--border-soft)',
+                          color: 'var(--pastel-blue-text)',
+                        }}
+                      >
+                        <QrCode className="w-5 h-5" />
+                        {tx('สแกน QR', 'Scan QR')}
+                      </button>
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           </div>
 
-          {/* 2. หน้าส่งอาหาร -> พ่อหมีขี่เวสป้าเขียวมิ้น + คิวจัดส่ง */}
+          {/* 2. หน้าจัดการออเดอร์ & ตรวจสลิป (ฝั่งร้านค้า / คิวจัดส่ง) */}
           <div
             className="rounded-3xl border p-5 shadow-sm space-y-4"
             style={{
@@ -508,7 +751,9 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
             <div className="flex items-center justify-between gap-2">
               <div>
                 <h3 className="text-base font-bold" style={{ color: 'var(--text-main)' }}>
-                  {tx('🛵 หน้าส่งอาหาร & คิวจัดส่ง', '🛵 Delivery & Order Queue')}
+                  {isMerchantView
+                    ? tx('จัดการออเดอร์ & ตรวจสลิป', 'Order Management & Slip Check')
+                    : tx('หน้าส่งอาหาร & คิวจัดส่ง', 'Delivery & Order Queue')}
                 </h3>
                 <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
                   {tx(
@@ -517,9 +762,32 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                   )}
                 </p>
               </div>
-              <span className="text-xs font-num font-semibold" style={{ color: 'var(--accent-text)' }}>
-                {sortedActiveQueue.length} {tx('คิว', 'orders')}
-              </span>
+              <div className="flex items-center gap-2 shrink-0">
+                {isMerchantView && onRefreshOrdersFromSheets && (
+                  <button
+                    type="button"
+                    disabled={isRefreshingOrders}
+                    onClick={async () => {
+                      playSoftClick();
+                      setIsRefreshingOrders(true);
+                      try {
+                        await onRefreshOrdersFromSheets();
+                      } finally {
+                        setIsRefreshingOrders(false);
+                      }
+                    }}
+                    className="px-2.5 py-1 rounded-xl border text-[11px] font-bold flex items-center gap-1 cursor-pointer"
+                    style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)', color: 'var(--accent-text)' }}
+                    title={tx('ดึงออเดอร์ออนไลน์ล่าสุดจาก Google Sheets', 'Refresh online orders from Google Sheets')}
+                  >
+                    <RefreshCw className={`w-3 h-3 ${isRefreshingOrders ? 'animate-spin' : ''}`} />
+                    {tx('รีเฟรช', 'Refresh')}
+                  </button>
+                )}
+                <span className="text-xs font-num font-semibold" style={{ color: 'var(--accent-text)' }}>
+                  {sortedActiveQueue.length} {tx('คิว', 'orders')}
+                </span>
+              </div>
             </div>
 
             {/* Papa Bear on Mint Vespa */}
@@ -530,65 +798,22 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
               <PapaBearVespaMascot pose="delivering" outfits={outfits} />
             </div>
 
-            {/* Delivery Choice */}
-            <div className="space-y-2.5">
-              <div className="grid grid-cols-2 gap-2">
-                <button
-                  type="button"
-                  onClick={() => setDeliveryType('รับเองที่ร้าน')}
-                  className="py-2.5 px-3 rounded-2xl border text-sm font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
-                  style={{
-                    backgroundColor: deliveryType === 'รับเองที่ร้าน' ? 'var(--accent-soft)' : 'var(--bg-canvas)',
-                    borderColor: deliveryType === 'รับเองที่ร้าน' ? 'var(--accent-primary)' : 'var(--border-soft)',
-                    color: deliveryType === 'รับเองที่ร้าน' ? 'var(--accent-text)' : 'var(--text-main)',
-                  }}
-                >
-                  <ShoppingBag className="w-4 h-4" />
-                  {tx('รับเองที่ร้าน', 'Self Pick-up')}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDeliveryType('ให้พ่อไปส่ง')}
-                  className="py-2.5 px-3 rounded-2xl border text-sm font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
-                  style={{
-                    backgroundColor: deliveryType === 'ให้พ่อไปส่ง' ? 'var(--accent-soft)' : 'var(--bg-canvas)',
-                    borderColor: deliveryType === 'ให้พ่อไปส่ง' ? 'var(--accent-primary)' : 'var(--border-soft)',
-                    color: deliveryType === 'ให้พ่อไปส่ง' ? 'var(--accent-text)' : 'var(--text-main)',
-                  }}
-                >
-                  <Truck className="w-4 h-4" />
-                  {tx('ให้พ่อไปส่ง', 'Papa Delivery')}
-                </button>
-              </div>
-
-              {deliveryType === 'ให้พ่อไปส่ง' && (
-                <div className="space-y-2 pt-1">
-                  <input
-                    type="text"
-                    value={customerName}
-                    onChange={(e) => setCustomerName(e.target.value)}
-                    placeholder={tx('ชื่อผู้สั่ง (เช่น น้องมิ้น)', 'Your name (e.g. Mint)')}
-                    className="w-full h-11 px-3.5 rounded-xl border text-sm focus:outline-none"
-                    style={{
-                      backgroundColor: 'var(--bg-canvas)',
-                      borderColor: 'var(--border-soft)',
-                      color: 'var(--text-main)',
-                    }}
-                  />
-                  <input
-                    type="text"
-                    value={dropPoint}
-                    onChange={(e) => setDropPoint(e.target.value)}
-                    placeholder={tx('จุดส่ง (เช่น หน้าตึก 2 / บ้านเลขที่)', 'Drop-off spot (e.g. Building 2 / House No.)')}
-                    className="w-full h-11 px-3.5 rounded-xl border text-sm focus:outline-none"
-                    style={{
-                      backgroundColor: 'var(--bg-canvas)',
-                      borderColor: 'var(--border-soft)',
-                      color: 'var(--text-main)',
-                    }}
-                  />
-                </div>
-              )}
+            {/* Current Dining / Delivery Selection Summary */}
+            <div
+              className="rounded-2xl border px-3.5 py-2.5 flex items-center justify-between gap-2 text-xs font-bold"
+              style={{
+                backgroundColor: 'var(--accent-soft)',
+                borderColor: 'var(--accent-border)',
+                color: 'var(--accent-text)',
+              }}
+            >
+              <span>
+                {tx('รูปแบบออเดอร์ปัจจุบัน:', 'Current Order Type:')}{' '}
+                {translateDeliveryType(deliveryType, lang)}
+                {deliveryType === 'ทานนี้' && tableNumber.trim()
+                  ? ` · ${tx('โต๊ะที่', 'Table')} ${tableNumber.trim()}`
+                  : ''}
+              </span>
             </div>
 
             {/* Active Queue List (Queue #1 on top) */}
@@ -597,45 +822,133 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                 {tx('ยังไม่มีคิวรอส่งค่ะ', 'No pending delivery orders')}
               </p>
             ) : (
-              <div className="space-y-2.5 max-h-52 overflow-y-auto">
+              <div className="space-y-2.5 max-h-72 overflow-y-auto pr-0.5">
                 {sortedActiveQueue.map((q) => (
                   <div
                     key={q.orderId}
-                    className="rounded-2xl border p-3 flex items-start justify-between gap-2"
+                    className="rounded-2xl border p-3 space-y-2"
                     style={{
                       backgroundColor: q.queueNo === sortedActiveQueue[0]?.queueNo ? 'var(--accent-soft)' : 'var(--bg-canvas)',
-                      borderColor: 'var(--border-soft)',
+                      borderColor: q.slipImageUrl && !q.accepted ? '#16A34A' : 'var(--border-soft)',
                     }}
                   >
-                    <div className="min-w-0">
-                      <p className="text-sm font-bold" style={{ color: 'var(--text-main)' }}>
-                        {tx(`คิวที่ ${q.queueNo}`, `Queue #${q.queueNo}`)} · {translateDeliveryType(q.deliveryType, lang)}
-                      </p>
-                      {(q.customerName || q.dropPoint) && (
-                        <p className="text-xs" style={{ color: 'var(--accent-text)' }}>
-                          {q.customerName} {q.dropPoint ? `(${q.dropPoint})` : ''}
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <p className="text-sm font-bold" style={{ color: 'var(--text-main)' }}>
+                            {tx(`คิวที่ ${q.queueNo}`, `Queue #${q.queueNo}`)} · {translateDeliveryType(q.deliveryType, lang)}
+                          </p>
+                          {isMerchantView && (q.tableNumber || (q.deliveryType === 'ทานนี้' && q.dropPoint)) && (
+                            <span
+                              className="inline-flex items-center px-2 py-0.5 rounded-lg text-[11px] font-bold font-num"
+                              style={{ backgroundColor: 'var(--accent-primary)', color: '#FFFFFF' }}
+                            >
+                              {q.tableNumber ? tx(`โต๊ะที่ ${q.tableNumber}`, `Table ${q.tableNumber}`) : q.dropPoint}
+                            </span>
+                          )}
+                          <span className="font-num text-xs font-extrabold" style={{ color: 'var(--accent-text)' }}>
+                            ฿{q.totalAmount.toLocaleString('th-TH')}
+                          </span>
+                        </div>
+
+                        {/* Status Badges: Slip Attached + Acceptance */}
+                        <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                          {q.slipImageUrl && (
+                            <span
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                              style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
+                            >
+                              <CheckCircle2 className="w-3 h-3" />
+                              {tx('แนบสลิปแล้ว', 'Slip Attached')}
+                            </span>
+                          )}
+                          {q.accepted ? (
+                            <span
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                              style={{ backgroundColor: 'var(--pastel-blue)', color: 'var(--pastel-blue-text)' }}
+                            >
+                              <Check className="w-3 h-3" />
+                              {tx('รับออเดอร์แล้ว', 'Accepted')}
+                            </span>
+                          ) : (
+                            <span
+                              className="inline-flex items-center px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                              style={{ backgroundColor: 'var(--pastel-peach)', color: 'var(--pastel-peach-text)' }}
+                            >
+                              {tx('รอร้านกดรับ', 'Pending Accept')}
+                            </span>
+                          )}
+                        </div>
+
+                        {isMerchantView && (q.customerName || (q.dropPoint && !q.tableNumber)) && (
+                          <p className="text-xs mt-1 font-medium" style={{ color: 'var(--accent-text)' }}>
+                            {q.customerName} {q.dropPoint && !q.tableNumber ? `(${q.dropPoint})` : ''}
+                          </p>
+                        )}
+                        <p className="text-xs mt-1 line-clamp-2" style={{ color: 'var(--text-muted)' }}>
+                          {q.items
+                            .map(
+                              (i) =>
+                                `${translateMenuName(i.name, lang)}${
+                                  i.tasteNote ? ` (${translateTasteNote(i.tasteNote, lang)})` : ''
+                                } ×${i.qty}`
+                            )
+                            .join(', ')}
                         </p>
-                      )}
-                      <p className="text-xs mt-1 truncate" style={{ color: 'var(--text-muted)' }}>
-                        {q.items
-                          .map(
-                            (i) =>
-                              `${translateMenuName(i.name, lang)}${
-                                i.tasteNote ? ` (${translateTasteNote(i.tasteNote, lang)})` : ''
-                              } ×${i.qty}`
-                          )
-                          .join(', ')}
-                      </p>
+                      </div>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => onMarkQueueDone(q.orderId)}
-                      className="px-3 py-1.5 rounded-xl text-xs font-bold text-white flex items-center gap-1 shrink-0 cursor-pointer"
-                      style={{ backgroundColor: 'var(--accent-primary)' }}
-                    >
-                      <CheckCircle2 className="w-3.5 h-3.5" />
-                      {tx('ส่งแล้ว', 'Done')}
-                    </button>
+
+                    {/* Action Row: Prominent View Slip (Merchant Only) + Merchant Accept / Done */}
+                    {isMerchantView && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t" style={{ borderColor: 'var(--border-soft)' }}>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {q.slipImageUrl && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                playSoftClick();
+                                setPreviewOrder(q);
+                              }}
+                              className="px-2.5 py-1.5 rounded-xl border text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                              style={{
+                                backgroundColor: 'var(--bg-card)',
+                                borderColor: 'var(--accent-primary)',
+                                color: 'var(--accent-text)',
+                              }}
+                            >
+                              <Eye className="w-3.5 h-3.5" />
+                              {tx('ดูรูปสลิป', 'View Slip')}
+                            </button>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1.5 ml-auto">
+                          {!q.accepted && onAcceptQueueOrder && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                playSoftClick();
+                                onAcceptQueueOrder(q.orderId);
+                              }}
+                              className="px-3 py-1.5 rounded-xl text-xs font-bold text-white flex items-center gap-1 cursor-pointer"
+                              style={{ backgroundColor: '#16A34A' }}
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              {tx('รับออเดอร์', 'Accept')}
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => onMarkQueueDone(q.orderId)}
+                            className="px-3 py-1.5 rounded-xl text-xs font-bold text-white flex items-center gap-1 cursor-pointer"
+                            style={{ backgroundColor: 'var(--accent-primary)' }}
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            {tx('ส่งแล้ว', 'Done')}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -848,6 +1161,108 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                   `Add to Order · ฿${(selectedFoodItem.price * modalQty).toLocaleString('en-US')}`
                 )}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal ตรวจสอบรูปสลิปโอนเงินขนาดชัดเจนพร้อมข้อมูลออเดอร์ */}
+      {isMerchantView && previewOrder && previewOrder.slipImageUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          onClick={() => setPreviewOrder(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-3xl border shadow-2xl overflow-hidden flex flex-col max-h-[92vh]"
+            style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="flex items-center justify-between px-5 py-3.5 border-b shrink-0"
+              style={{ borderColor: 'var(--border-soft)' }}
+            >
+              <div>
+                <h4 className="font-bold text-base flex items-center gap-1.5" style={{ color: 'var(--text-main)' }}>
+                  <FileImage className="w-4 h-4" style={{ color: 'var(--accent-primary)' }} />
+                  {tx('ตรวจสอบหลักฐานสลิปโอนเงิน', 'Verify Transfer Slip')}
+                </h4>
+                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                  {tx(`คิวที่ ${previewOrder.queueNo}`, `Queue #${previewOrder.queueNo}`)} · #{previewOrder.orderId} ·{' '}
+                  <span className="font-num font-bold" style={{ color: 'var(--accent-text)' }}>
+                    ฿{previewOrder.totalAmount.toLocaleString('th-TH')}
+                  </span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewOrder(null)}
+                className="w-9 h-9 rounded-xl border flex items-center justify-center cursor-pointer"
+                style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                aria-label={tx('ปิดหน้าต่าง', 'Close')}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-4 flex justify-center bg-stone-50 overflow-y-auto">
+              <img
+                src={previewOrder.slipImageUrl}
+                alt={tx('สลิปโอนเงินลูกค้า', 'Customer transfer slip')}
+                className="max-h-[62vh] w-auto rounded-2xl object-contain border border-stone-200 shadow-sm"
+              />
+            </div>
+
+            <div
+              className="p-4 border-t space-y-2.5 shrink-0"
+              style={{ borderColor: 'var(--border-soft)', backgroundColor: 'var(--bg-canvas)' }}
+            >
+              <div className="flex items-center justify-between text-xs">
+                <span style={{ color: 'var(--text-muted)' }}>
+                  {previewOrder.customerName || translateDeliveryType(previewOrder.deliveryType, lang)}
+                  {previewOrder.dropPoint ? ` (${previewOrder.dropPoint})` : ''}
+                </span>
+                <span
+                  className="px-2 py-0.5 rounded-lg font-bold"
+                  style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
+                >
+                  {tx('แนบสลิปแล้ว', 'Slip Attached')}
+                </span>
+              </div>
+
+              {isMerchantView && !previewOrder.accepted && onAcceptQueueOrder ? (
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setPreviewOrder(null)}
+                    className="h-11 rounded-xl border text-xs font-bold cursor-pointer"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                  >
+                    {tx('ปิด', 'Close')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSoftClick();
+                      onAcceptQueueOrder(previewOrder.orderId);
+                      setPreviewOrder(null);
+                    }}
+                    className="col-span-2 h-11 rounded-xl font-bold text-sm text-white flex items-center justify-center gap-1.5 cursor-pointer"
+                    style={{ backgroundColor: '#16A34A' }}
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    {tx('สลิปถูกต้อง · กดรับออเดอร์ ✓', 'Slip Valid · Accept Order ✓')}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => setPreviewOrder(null)}
+                  className="w-full h-11 rounded-xl font-bold text-sm text-white cursor-pointer"
+                  style={{ backgroundColor: 'var(--accent-primary)' }}
+                >
+                  {tx('ปิดหน้าต่าง', 'Close')}
+                </button>
+              )}
             </div>
           </div>
         </div>

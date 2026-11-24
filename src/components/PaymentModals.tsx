@@ -1,18 +1,28 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Building2,
   Check,
+  Copy,
   Delete,
   Download,
+  ExternalLink,
   Gift,
+  ImagePlus,
   LockKeyhole,
+  MessageCircle,
+  Paperclip,
+  PauseCircle,
   Star,
+  Trash2,
   UserPlus,
   X,
+  ZoomIn,
 } from 'lucide-react';
-import { StaffUser } from '../config/shopConfig';
+import { BANK_PRESETS, PaymentAccount, StaffUser } from '../config/shopConfig';
 import { BearFamilyOutfits } from '../config/bearOutfits';
 import { translateMenuName, translateStaffName, translateTasteNote, useLang } from '../config/i18n';
-import { generatePromptPayQrDataUrl } from '../utils/promptpay';
+import { compressSlipImageFile } from '../utils/imageUpload';
+import { generatePromptPayQrDataUrl, isValidPromptPayTarget } from '../utils/promptpay';
 import {
   BillLineItem,
   checkAutoPaymentFromSheets,
@@ -21,10 +31,12 @@ import {
   generateNextMemberId,
   getMembersCache,
   postToSheets,
+  ReceiptSlipRecord,
   saveMembersCache,
 } from '../utils/sheetsSync';
 import { playScanError, playScanSuccess, playSoftClick, speakMessage } from '../utils/sound';
 import { BearGangMascot, BearParentsCelebration, MamaBearMascot } from './BearGangMascot';
+import { ReceiptSlipCard } from './ReceiptSlipCard';
 
 /* ==================== 1. CASH PAYMENT MODAL ==================== */
 interface CashPaymentModalProps {
@@ -252,13 +264,18 @@ interface QrPaymentModalProps {
   items?: BillLineItem[];
   promptPayId: string;
   promptPayAccountName?: string;
+  paymentAccounts?: PaymentAccount[];
+  activePaymentAccountId?: string;
+  onSelectPaymentAccount?: (accountId: string) => void;
   shopNameTh: string;
   enableAutoPaymentCheck: boolean;
   scriptUrl: string;
   mascotMode?: 'kids' | 'krua';
   outfits?: BearFamilyOutfits;
+  allowSlipUpload?: boolean;
+  lineShopUrl?: string;
   onClose: () => void;
-  onConfirmPaid: () => void;
+  onConfirmPaid: (slipImageUrl?: string, bankAccountLabel?: string) => void;
 }
 
 export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
@@ -267,24 +284,93 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
   items = [],
   promptPayId,
   promptPayAccountName = 'คำวัง พวงมาลา',
+  paymentAccounts = [],
+  activePaymentAccountId,
+  onSelectPaymentAccount,
   shopNameTh,
   enableAutoPaymentCheck,
   scriptUrl,
   mascotMode = 'kids',
   outfits,
+  allowSlipUpload = false,
+  lineShopUrl = '',
   onClose,
   onConfirmPaid,
 }) => {
   const { lang, tx } = useLang();
   const [qrUrl, setQrUrl] = useState('');
   const [isAutoPolling, setIsAutoPolling] = useState(false);
+  const [slipImageUrl, setSlipImageUrl] = useState('');
+  const [slipError, setSlipError] = useState('');
+  const [isCompressingSlip, setIsCompressingSlip] = useState(false);
+  const [slipZoomOpen, setSlipZoomOpen] = useState(false);
+  const [copiedAccountNo, setCopiedAccountNo] = useState(false);
+  const [lineBackupConfirmed, setLineBackupConfirmed] = useState(false);
+  const [localSelectedId, setLocalSelectedId] = useState<string>('');
+  const slipInputRef = useRef<HTMLInputElement>(null);
+
+  const effectiveAccounts = useMemo<PaymentAccount[]>(() => {
+    if (paymentAccounts && paymentAccounts.length > 0) return paymentAccounts;
+    return [
+      {
+        id: 'acc_fallback',
+        bankName: 'พร้อมเพย์ (PromptPay)',
+        accountName: promptPayAccountName,
+        accountNumber: promptPayId,
+        promptPayId,
+      },
+    ];
+  }, [paymentAccounts, promptPayAccountName, promptPayId]);
 
   useEffect(() => {
-    if (!isOpen) return;
-    generatePromptPayQrDataUrl(promptPayId, amount)
-      .then(setQrUrl)
-      .catch(() => setQrUrl(''));
-  }, [isOpen, promptPayId, amount]);
+    if (isOpen) {
+      setLocalSelectedId(activePaymentAccountId || effectiveAccounts[0]?.id || '');
+      setCopiedAccountNo(false);
+    }
+  }, [isOpen, activePaymentAccountId, effectiveAccounts]);
+
+  const selectedAccount = useMemo(() => {
+    const targetId = activePaymentAccountId || localSelectedId;
+    return effectiveAccounts.find((a) => a.id === targetId) || effectiveAccounts[0];
+  }, [effectiveAccounts, activePaymentAccountId, localSelectedId]);
+
+  const activePromptPayTarget = useMemo(() => {
+    if (!selectedAccount) return promptPayId;
+    if (isValidPromptPayTarget(selectedAccount.promptPayId)) {
+      return selectedAccount.promptPayId!.trim();
+    }
+    if (isValidPromptPayTarget(selectedAccount.accountNumber)) {
+      return selectedAccount.accountNumber.trim();
+    }
+    return '';
+  }, [selectedAccount, promptPayId]);
+
+  const bankLabel = selectedAccount
+    ? `${selectedAccount.bankName} (${selectedAccount.accountNumber})`
+    : promptPayId;
+
+  useEffect(() => {
+    if (!isOpen) {
+      setSlipImageUrl('');
+      setSlipError('');
+      setIsCompressingSlip(false);
+      setSlipZoomOpen(false);
+      setLineBackupConfirmed(false);
+      setQrUrl('');
+      return;
+    }
+    if (selectedAccount?.qrImageUrl) {
+      setQrUrl(selectedAccount.qrImageUrl);
+      return;
+    }
+    if (activePromptPayTarget) {
+      generatePromptPayQrDataUrl(activePromptPayTarget, amount)
+        .then(setQrUrl)
+        .catch(() => setQrUrl(''));
+    } else {
+      setQrUrl('');
+    }
+  }, [isOpen, selectedAccount, activePromptPayTarget, amount]);
 
   useEffect(() => {
     if (!isOpen || !enableAutoPaymentCheck || !scriptUrl) {
@@ -296,14 +382,48 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
     const interval = window.setInterval(async () => {
       const paid = await checkAutoPaymentFromSheets(scriptUrl, amount);
       if (paid) {
-        onConfirmPaid();
+        onConfirmPaid(slipImageUrl || undefined, bankLabel);
       }
     }, 3000);
 
     return () => window.clearInterval(interval);
-  }, [isOpen, enableAutoPaymentCheck, scriptUrl, amount, onConfirmPaid]);
+  }, [isOpen, enableAutoPaymentCheck, scriptUrl, amount, onConfirmPaid, slipImageUrl, bankLabel]);
 
   if (!isOpen) return null;
+
+  const handleSlipFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    playSoftClick();
+    setSlipError('');
+    setIsCompressingSlip(true);
+    try {
+      const compressed = await compressSlipImageFile(file);
+      setSlipImageUrl(compressed);
+      playScanSuccess();
+    } catch {
+      playScanError();
+      setSlipError(
+        tx(
+          'ไม่สามารถอ่านรูปสลิปได้ กรุณาเลือกไฟล์ JPG หรือ PNG ค่ะ',
+          'Could not read slip image. Please select a JPG or PNG file.'
+        )
+      );
+    } finally {
+      setIsCompressingSlip(false);
+    }
+  };
+
+  const cleanLineUrl = lineShopUrl.trim();
+  const hasCustomLineUrl = /^https?:\/\//i.test(cleanLineUrl);
+  const fallbackLineShareHref = `https://line.me/R/msg/text/?${encodeURIComponent(
+    `แจ้งชำระเงิน ${shopNameTh} ยอดโอน ฿${amount.toLocaleString('th-TH', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2,
+    })} (แนบสลิปส่งทาง LINE สำรองค่ะ)`
+  )}`;
+  const effectiveLineHref = hasCustomLineUrl ? cleanLineUrl : fallbackLineShareHref;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-sm p-4 overflow-y-auto">
@@ -325,18 +445,18 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
           }}
         >
           <div className="flex items-center justify-between px-5 py-3.5 border-b" style={{ borderColor: 'var(--border-soft)' }}>
-            <div>
-              <h3 className="text-lg font-bold" style={{ color: 'var(--text-main)' }}>
-                {tx('สแกนจ่ายพร้อมเพย์ (PromptPay)', 'Scan PromptPay QR')}
+            <div className="min-w-0">
+              <h3 className="text-lg font-bold truncate" style={{ color: 'var(--text-main)' }}>
+                {tx('สแกนจ่าย / โอนเงินเข้าบัญชีร้าน', 'Scan QR / Bank Transfer')}
               </h3>
-              <p className="text-xs font-medium" style={{ color: 'var(--text-muted)' }}>
-                {shopNameTh} · {promptPayId}
+              <p className="text-xs font-medium truncate" style={{ color: 'var(--text-muted)' }}>
+                {shopNameTh} · {selectedAccount?.bankName}
               </p>
             </div>
             <button
               type="button"
               onClick={onClose}
-              className="w-11 h-11 rounded-2xl border flex items-center justify-center cursor-pointer"
+              className="w-11 h-11 rounded-2xl border flex items-center justify-center cursor-pointer shrink-0"
               style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
               aria-label={tx('ปิดหน้าต่าง', 'Close')}
             >
@@ -345,6 +465,45 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
           </div>
 
           <div className="p-5 flex flex-col items-center text-center space-y-3.5">
+            {/* Multi-Bank Account Selector when shop has >= 2 accounts */}
+            {effectiveAccounts.length > 1 && (
+              <div className="w-full space-y-1.5 text-left">
+                <p className="text-[11px] font-bold flex items-center gap-1" style={{ color: 'var(--text-muted)' }}>
+                  <Building2 className="w-3.5 h-3.5" style={{ color: 'var(--accent-primary)' }} />
+                  {tx('เลือกบัญชีธนาคารที่ต้องการรับโอน:', 'Select Receiving Bank Account:')}
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {effectiveAccounts.map((acc) => {
+                    const active = acc.id === selectedAccount?.id;
+                    const preset = BANK_PRESETS.find((b) => b.name === acc.bankName);
+                    return (
+                      <button
+                        key={acc.id}
+                        type="button"
+                        onClick={() => {
+                          playSoftClick();
+                          setLocalSelectedId(acc.id);
+                          onSelectPaymentAccount?.(acc.id);
+                          setCopiedAccountNo(false);
+                        }}
+                        className="px-2.5 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-all"
+                        style={{
+                          backgroundColor: active
+                            ? preset?.badgeColor || 'var(--accent-soft)'
+                            : 'var(--bg-canvas)',
+                          borderColor: active ? 'var(--accent-primary)' : 'var(--border-soft)',
+                          color: active ? preset?.textColor || 'var(--accent-text)' : 'var(--text-main)',
+                        }}
+                      >
+                        {active && <Check className="w-3.5 h-3.5" />}
+                        <span>{acc.bankName.split(' (')[0]}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
             {/* Itemized Order Details */}
             {items.length > 0 && (
               <div
@@ -368,7 +527,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
               </div>
             )}
 
-            {/* Total Amount + PromptPay Receiver Details */}
+            {/* Total Amount + Selected Bank Receiver Details */}
             <div
               className="w-full rounded-2xl py-3 px-4 border space-y-1.5"
               style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
@@ -380,36 +539,237 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                 ฿{amount.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
               </p>
               <div
-                className="pt-2 mt-1 border-t text-xs sm:text-sm space-y-0.5"
+                className="pt-2 mt-1 border-t text-xs sm:text-sm space-y-1"
                 style={{ borderColor: 'var(--border-soft)' }}
               >
                 <p className="font-bold" style={{ color: 'var(--text-main)' }}>
-                  {tx('เบอร์พร้อมเพย์:', 'PromptPay:')}{' '}
-                  <span className="font-num tracking-wide" style={{ color: 'var(--accent-text)' }}>
-                    {promptPayId}
-                  </span>
+                  {selectedAccount?.bankName}
                 </p>
-                {promptPayAccountName && (
+                <div className="flex items-center justify-center gap-2 flex-wrap">
+                  <span className="font-num font-bold tracking-wide text-base" style={{ color: 'var(--accent-text)' }}>
+                    {selectedAccount?.accountNumber || promptPayId}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      playSoftClick();
+                      try {
+                        await navigator.clipboard.writeText(
+                          (selectedAccount?.accountNumber || promptPayId).replace(/\s+/g, '')
+                        );
+                        setCopiedAccountNo(true);
+                        window.setTimeout(() => setCopiedAccountNo(false), 2000);
+                      } catch {
+                        // Ignore clipboard restriction
+                      }
+                    }}
+                    className="px-2 py-0.5 rounded-lg border text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                  >
+                    {copiedAccountNo ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                    {copiedAccountNo ? tx('คัดลอกแล้ว', 'Copied') : tx('คัดลอกเลข', 'Copy')}
+                  </button>
+                </div>
+                {(selectedAccount?.accountName || promptPayAccountName) && (
                   <p className="font-semibold" style={{ color: 'var(--text-muted)' }}>
                     {tx('ชื่อบัญชี:', 'Account Name:')}{' '}
-                    <span style={{ color: 'var(--text-main)' }}>{promptPayAccountName}</span>
+                    <span style={{ color: 'var(--text-main)' }}>
+                      {selectedAccount?.accountName || promptPayAccountName}
+                    </span>
                   </p>
                 )}
               </div>
             </div>
 
-            {/* QR Code */}
-            <div className="p-3 bg-white rounded-3xl border shadow-inner" style={{ borderColor: 'var(--border-soft)' }}>
-              {qrUrl ? (
-                <img src={qrUrl} alt="PromptPay QR Code" className="w-52 h-52 sm:w-56 sm:h-56 object-contain" />
-              ) : (
+            {/* QR Code (Uploaded Bank QR or Dynamic PromptPay QR) */}
+            {qrUrl ? (
+              <div className="p-3 bg-white rounded-3xl border shadow-inner" style={{ borderColor: 'var(--border-soft)' }}>
+                <img src={qrUrl} alt="Payment QR Code" className="w-52 h-52 sm:w-56 sm:h-56 object-contain" />
+              </div>
+            ) : activePromptPayTarget ? (
+              <div className="p-3 bg-white rounded-3xl border shadow-inner" style={{ borderColor: 'var(--border-soft)' }}>
                 <div className="w-52 h-52 flex items-center justify-center text-sm text-stone-400">
                   {tx('กำลังสร้าง QR Code...', 'Generating QR Code...')}
                 </div>
-              )}
-            </div>
+              </div>
+            ) : (
+              <div
+                className="w-full rounded-2xl border border-dashed p-4 text-xs space-y-1"
+                style={{ backgroundColor: 'var(--bg-subtle)', borderColor: 'var(--accent-border)', color: 'var(--text-muted)' }}
+              >
+                <p className="font-bold text-sm" style={{ color: 'var(--accent-text)' }}>
+                  {tx('โอนเงินผ่านเลขบัญชีธนาคารด้านบนได้เลยค่ะ', 'Transfer via the bank account number above')}
+                </p>
+                <p>
+                  {tx(
+                    'กดปุ่ม "คัดลอกเลข" เพื่อนำไปวางโอนในแอปธนาคารได้ทันทีค่ะ',
+                    'Tap "Copy" to paste the account number in your banking app.'
+                  )}
+                </p>
+              </div>
+            )}
+
+            {/* Primary Web Slip Upload + Small Backup LINE Option */}
+            {allowSlipUpload && (
+              <div
+                className="w-full rounded-2xl border p-3.5 text-left space-y-2.5"
+                style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--accent-border)' }}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs sm:text-sm font-bold flex items-center gap-1.5" style={{ color: 'var(--text-main)' }}>
+                    <Paperclip className="w-4 h-4" style={{ color: 'var(--accent-primary)' }} />
+                    {tx('แนบสลิปโอนเงิน (ส่งตรงเข้าร้าน)', 'Attach Transfer Slip (Direct Web Upload)')}
+                  </p>
+                  {slipImageUrl && (
+                    <span
+                      className="px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                      style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
+                    >
+                      {tx('แนบสลิปแล้ว', 'Slip Attached')}
+                    </span>
+                  )}
+                </div>
+
+                <input
+                  ref={slipInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleSlipFileChange}
+                  className="hidden"
+                />
+
+                {slipImageUrl ? (
+                  <div className="flex items-center gap-3 rounded-2xl border p-2.5" style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playSoftClick();
+                        setSlipZoomOpen(true);
+                      }}
+                      className="relative w-18 h-24 rounded-xl overflow-hidden border shrink-0 bg-white cursor-pointer group"
+                      style={{ borderColor: 'var(--accent-primary)' }}
+                      title={tx('แตะเพื่อดูรูปสลิปขนาดใหญ่', 'Tap to enlarge slip')}
+                    >
+                      <img
+                        src={slipImageUrl}
+                        alt={tx('รูปสลิปโอนเงิน', 'Transfer slip preview')}
+                        className="w-full h-full object-cover"
+                      />
+                      <span className="absolute bottom-1 right-1 w-5 h-5 rounded-md bg-black/60 text-white flex items-center justify-center">
+                        <ZoomIn className="w-3 h-3" />
+                      </span>
+                    </button>
+                    <div className="flex-1 space-y-1.5 min-w-0">
+                      <p className="text-xs font-bold" style={{ color: 'var(--accent-text)' }}>
+                        {tx('ย่อขนาดรูปอัตโนมัติพร้อมส่งแล้วค่ะ', 'Auto-resized & ready to send with order')}
+                      </p>
+                      <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                        {tx('แตะที่รูปสลิปเพื่อขยายตรวจดูความชัดเจนได้ค่ะ', 'Tap preview image to inspect clearly')}
+                      </p>
+                      <div className="flex flex-wrap gap-1.5 pt-0.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playSoftClick();
+                            slipInputRef.current?.click();
+                          }}
+                          className="px-2.5 py-1.5 rounded-xl border text-xs font-bold cursor-pointer"
+                          style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                        >
+                          {tx('เปลี่ยนรูปสลิป', 'Change Slip')}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playSoftClick();
+                            setSlipImageUrl('');
+                          }}
+                          className="px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 cursor-pointer"
+                          style={{ backgroundColor: 'var(--pastel-pink)', color: 'var(--pastel-pink-text)' }}
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          {tx('ลบรูป', 'Remove')}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    <button
+                      type="button"
+                      disabled={isCompressingSlip}
+                      onClick={() => {
+                        playSoftClick();
+                        slipInputRef.current?.click();
+                      }}
+                      className="w-full h-12 px-4 rounded-xl border-2 border-dashed font-bold text-sm flex items-center justify-center gap-2 cursor-pointer transition-transform active:scale-[0.99] disabled:opacity-60"
+                      style={{
+                        backgroundColor: 'var(--accent-soft)',
+                        borderColor: 'var(--accent-primary)',
+                        color: 'var(--accent-text)',
+                      }}
+                    >
+                      <Paperclip className="w-4 h-4" />
+                      {isCompressingSlip
+                        ? tx('กำลังย่อขนาดรูปสลิป...', 'Compressing slip image...')
+                        : tx('แนบสลิปโอนเงิน', 'Attach Transfer Slip')}
+                    </button>
+                    <p className="text-[11px] text-center" style={{ color: 'var(--text-muted)' }}>
+                      {tx(
+                        'เลือกรูปสลิปจากมือถือหรือคอม ย่อขนาดอัตโนมัติส่งไวไม่ค้าง',
+                        'Select slip photo from phone or PC · Auto-resized for fast upload'
+                      )}
+                    </p>
+                  </div>
+                )}
+
+                {slipError && (
+                  <p className="text-xs font-semibold text-rose-600">{slipError}</p>
+                )}
+
+                {/* Small Secondary Backup LINE Button */}
+                <div className="pt-1 border-t flex items-center justify-between gap-2" style={{ borderColor: 'var(--border-soft)' }}>
+                  <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                    {lineBackupConfirmed
+                      ? tx('เปิดส่งสลิปทาง LINE แล้ว ✓', 'LINE slip backup selected ✓')
+                      : tx('ทางเลือกสำรอง:', 'Backup option:')}
+                  </span>
+                  <a
+                    href={effectiveLineHref}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => {
+                      playSoftClick();
+                      setLineBackupConfirmed(true);
+                    }}
+                    className="px-2.5 py-1 rounded-lg border text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer hover:opacity-85"
+                    style={{
+                      backgroundColor: lineBackupConfirmed ? '#DCFCE7' : 'var(--bg-card)',
+                      borderColor: '#86EFAC',
+                      color: '#15803D',
+                    }}
+                  >
+                    <MessageCircle className="w-3 h-3" />
+                    {tx('ส่งสลิปทาง LINE', 'Send via LINE')}
+                    <ExternalLink className="w-2.5 h-2.5 opacity-80" />
+                  </a>
+                </div>
+              </div>
+            )}
 
             {/* Payment Check Status */}
+            {allowSlipUpload && !slipImageUrl && !lineBackupConfirmed && (
+              <p
+                className="text-xs sm:text-sm font-bold px-4 py-2.5 rounded-2xl w-full"
+                style={{ backgroundColor: '#FFE4E6', color: '#BE123C' }}
+              >
+                {tx(
+                  'กรุณาแนบรูปสลิปโอนเงินด้านบนก่อนกดส่งออเดอร์นะคะ',
+                  'Please attach your transfer slip above before sending the order.'
+                )}
+              </p>
+            )}
+
             <p
               className="text-sm font-medium px-4 py-2.5 rounded-2xl w-full"
               style={{
@@ -422,8 +782,8 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                   ? tx('กำลังเช็กยอดเงินเข้าอัตโนมัติทุก 3 วินาที...', 'Checking payment automatically every 3 seconds...')
                   : tx('กำลังตรวจสอบยอดเงินเข้าอัตโนมัติ...', 'Auto-checking incoming transfer...')
                 : tx(
-                    'ตรวจสอบชื่อบัญชี "คำวัง พวงมาลา" และยอดเงินก่อนกดยืนยัน',
-                    'Verify account name & transfer confirmation before confirming'
+                    `ตรวจสอบชื่อบัญชี "${selectedAccount?.accountName || promptPayAccountName}" และยอดเงินก่อนกดยืนยัน`,
+                    `Verify account name "${selectedAccount?.accountName || promptPayAccountName}" & amount before confirming`
                   )}
             </p>
 
@@ -438,16 +798,60 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
               </button>
               <button
                 type="button"
-                onClick={onConfirmPaid}
-                className="col-span-2 h-14 rounded-2xl font-bold text-lg text-white cursor-pointer transition-transform active:scale-95"
+                disabled={isCompressingSlip || (allowSlipUpload && !slipImageUrl && !lineBackupConfirmed)}
+                onClick={() => onConfirmPaid(slipImageUrl || undefined, bankLabel)}
+                className="col-span-2 h-14 rounded-2xl font-bold text-base sm:text-lg text-white cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed transition-transform active:scale-95"
                 style={{ backgroundColor: '#16A34A' }}
               >
-                {tx('โอนเรียบร้อยแล้ว ✓', 'Payment Confirmed ✓')}
+                {allowSlipUpload
+                  ? slipImageUrl
+                    ? tx('ยืนยันคำสั่งซื้อ & ส่งสลิป ✓', 'Confirm Order & Send Slip ✓')
+                    : tx('แจ้งโอน & ส่งออเดอร์ ✓', 'Notify Payment & Send Order ✓')
+                  : tx('โอนเรียบร้อยแล้ว ✓', 'Payment Confirmed ✓')}
               </button>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Full-size Preview Modal for Customer Before Submitting */}
+      {slipZoomOpen && slipImageUrl && (
+        <div
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
+          onClick={() => setSlipZoomOpen(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-3xl border shadow-2xl overflow-hidden"
+            style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              className="flex items-center justify-between px-4 py-3 border-b"
+              style={{ borderColor: 'var(--border-soft)' }}
+            >
+              <h4 className="font-bold text-sm" style={{ color: 'var(--text-main)' }}>
+                {tx('ตัวอย่างรูปสลิปก่อนส่ง', 'Slip Preview Before Sending')}
+              </h4>
+              <button
+                type="button"
+                onClick={() => setSlipZoomOpen(false)}
+                className="w-9 h-9 rounded-xl border flex items-center justify-center cursor-pointer"
+                style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                aria-label={tx('ปิดหน้าต่าง', 'Close')}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 flex justify-center bg-stone-50">
+              <img
+                src={slipImageUrl}
+                alt={tx('ตัวอย่างรูปสลิป', 'Slip preview')}
+                className="max-h-[70vh] w-auto rounded-2xl object-contain"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -464,6 +868,8 @@ interface PaymentSuccessOverlayProps {
   scriptUrl: string;
   mascotMode?: 'kids' | 'krua';
   outfits?: BearFamilyOutfits;
+  receiptSlipEnabled?: boolean;
+  receiptData?: ReceiptSlipRecord | null;
   onClose: () => void;
 }
 
@@ -478,6 +884,8 @@ export const PaymentSuccessOverlay: React.FC<PaymentSuccessOverlayProps> = ({
   scriptUrl,
   mascotMode = 'kids',
   outfits,
+  receiptSlipEnabled = true,
+  receiptData,
   onClose,
 }) => {
   const { lang, tx } = useLang();
@@ -772,7 +1180,7 @@ export const PaymentSuccessOverlay: React.FC<PaymentSuccessOverlayProps> = ({
           <BearGangMascot pose="celebrating" outfits={outfits} />
         )}
 
-        <div className="text-center space-y-1">
+        <div className="text-center space-y-1 print:hidden">
           <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/20 text-white font-semibold text-sm">
             <Check className="w-4 h-4" />
             {tx('ชำระเงินสำเร็จเรียบร้อยแล้วค่ะ', 'Payment Successful!')}
@@ -785,8 +1193,21 @@ export const PaymentSuccessOverlay: React.FC<PaymentSuccessOverlayProps> = ({
           </p>
         </div>
 
+        {/* Digital & Printable Receipt Slip with Gate Exit QR */}
+        {receiptSlipEnabled && receiptData ? (
+          <ReceiptSlipCard receipt={receiptData} />
+        ) : !receiptSlipEnabled ? (
+          <div className="rounded-2xl bg-white/15 border border-white/25 px-4 py-3 text-center text-sm font-semibold text-emerald-50 flex items-center justify-center gap-2 print:hidden">
+            <PauseCircle className="w-4 h-4 shrink-0" />
+            {tx(
+              'ปิดการออกใบสลิปชั่วคราว (บันทึกยอดขายเรียบร้อยแล้ว)',
+              'Receipt slip issuance is paused (sale recorded)'
+            )}
+          </div>
+        ) : null}
+
         {/* Loyalty / Member Card Box */}
-        <div className="rounded-3xl bg-[#FFFDF9] text-[#2F2620] p-5 sm:p-6 shadow-xl space-y-4">
+        <div className="rounded-3xl bg-[#FFFDF9] text-[#2F2620] p-5 sm:p-6 shadow-xl space-y-4 print:hidden">
           {!showRegisterForm && !activeMember && (
             <form onSubmit={handleSaveStars} className="space-y-3">
               <div className="flex items-center justify-between gap-2">
@@ -985,7 +1406,7 @@ export const PaymentSuccessOverlay: React.FC<PaymentSuccessOverlayProps> = ({
         <button
           type="button"
           onClick={onClose}
-          className="w-full h-15 rounded-3xl bg-white text-emerald-800 font-bold text-xl shadow-lg cursor-pointer transition-transform active:scale-[0.98]"
+          className="w-full h-15 rounded-3xl bg-white text-emerald-800 font-bold text-xl shadow-lg cursor-pointer transition-transform active:scale-[0.98] print:hidden"
         >
           {tx('ปิดหน้านี้ & ขายบิลถัดไป →', 'Done & Next Bill →')}
         </button>

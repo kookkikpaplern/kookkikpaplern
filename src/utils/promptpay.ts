@@ -20,6 +20,21 @@ function tlv(tag: string, value: string): string {
   return `${tag}${len}${value}`;
 }
 
+export function isValidPromptPayTarget(rawId?: string): boolean {
+  if (!rawId) return false;
+  const digits = rawId.replace(/\D/g, '');
+  if (digits.length === 10 && (digits.startsWith('06') || digits.startsWith('08') || digits.startsWith('09'))) {
+    return true;
+  }
+  if (digits.length === 11 && digits.startsWith('66')) {
+    return true;
+  }
+  if (digits.length === 13 || digits.length >= 15) {
+    return true;
+  }
+  return false;
+}
+
 export function formatPromptPayTarget(rawId: string): string {
   const digits = rawId.replace(/\D/g, '');
   if (digits.length === 10 && digits.startsWith('0')) {

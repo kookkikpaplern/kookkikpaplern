@@ -27,9 +27,13 @@ export interface CustomerQueueOrder {
   items: BillLineItem[];
   totalAmount: number;
   totalStars: number;
-  deliveryType: 'รับเองที่ร้าน' | 'ให้พ่อไปส่ง';
+  deliveryType: 'ทานนี้' | 'กลับบ้าน' | 'รับเองที่ร้าน' | 'ให้พ่อไปส่ง';
+  tableNumber?: string;
+  paymentMethod?: 'เงินสด' | 'สแกน QR';
   customerName?: string;
   dropPoint?: string;
+  slipImageUrl?: string;
+  accepted?: boolean;
   createdAt: string;
   status: 'กำลังทำ' | 'เสร็จแล้ว';
 }
@@ -51,6 +55,25 @@ export interface VoidLogEntry {
   amount: number;
 }
 
+export interface ReceiptSlipRecord {
+  billId: string;
+  orgCode: string;
+  issuedAt: string;
+  timestamp: string;
+  shopType: 'store' | 'krua';
+  shopName: string;
+  mode: 'ขายจริง' | 'ทดสอบระบบ';
+  staffName: string;
+  paymentMethod: 'เงินสด' | 'สแกน QR';
+  bankAccountLabel?: string;
+  deliveryInfo?: string;
+  items: BillLineItem[];
+  totalAmount: number;
+  totalStars: number;
+  exitedAt?: string;
+  exitedBy?: string;
+}
+
 export interface SaleHistoryEntry {
   id: string;
   timestamp: string;
@@ -64,6 +87,9 @@ export interface SaleHistoryEntry {
   totalStars: number;
   itemsSummary: string;
   deliveryInfo?: string;
+  slipImageUrl?: string;
+  exitedAt?: string;
+  exitedBy?: string;
 }
 
 export interface SyncedBackendData {
@@ -72,6 +98,7 @@ export interface SyncedBackendData {
   staffUsers?: Record<string, StaffUser>;
   faqs?: FaqItem[];
   rewardOffers?: RewardOffer[];
+  queueOrders?: CustomerQueueOrder[];
 }
 
 const STORAGE_KEYS = {
@@ -84,6 +111,7 @@ const STORAGE_KEYS = {
   FAQ_CACHE: 'kkp_faq_cache',
   REWARD_OFFERS_CACHE: 'kkp_reward_offers_cache',
   SETTINGS_CACHE: 'kkp_settings_cache',
+  RECEIPT_SLIPS: 'kkp_receipt_slips_cache',
   TEST_MODE_DATE: 'kkp_test_mode_date',
   TEST_MODE_FLAG: 'kkp_is_test_mode',
 };
@@ -247,6 +275,7 @@ export async function syncAllFromSheets(scriptUrl: string): Promise<SyncedBacken
       staffUsers?: Array<Record<string, unknown>> | Record<string, StaffUser>;
       faqs?: Array<Record<string, unknown>>;
       rewardOffers?: Array<Record<string, unknown>>;
+      queueOrders?: Array<Record<string, unknown>>;
     };
 
     const result: SyncedBackendData = {};
@@ -326,7 +355,81 @@ export async function syncAllFromSheets(scriptUrl: string): Promise<SyncedBacken
       }
     }
 
+    if (Array.isArray(data.queueOrders) && data.queueOrders.length > 0) {
+      result.queueOrders = mapOnlineOrderRows(data.queueOrders);
+    }
+
     return result;
+  } catch {
+    return null;
+  }
+}
+
+function mapOnlineOrderRows(rawRows: Array<Record<string, unknown>>): CustomerQueueOrder[] {
+  return rawRows
+    .map((row, idx) => {
+      let parsedItems: BillLineItem[] = [];
+      if (Array.isArray(row.items)) {
+        parsedItems = row.items as BillLineItem[];
+      } else if (typeof row.itemsJson === 'string' && row.itemsJson.trim()) {
+        try {
+          const arr = JSON.parse(row.itemsJson);
+          if (Array.isArray(arr)) parsedItems = arr;
+        } catch {
+          parsedItems = [];
+        }
+      }
+      const deliveryRaw = String(row.deliveryType || 'รับเองที่ร้าน').trim();
+      const deliveryType: 'ทานนี้' | 'กลับบ้าน' | 'รับเองที่ร้าน' | 'ให้พ่อไปส่ง' =
+        deliveryRaw === 'ทานนี้'
+          ? 'ทานนี้'
+          : deliveryRaw === 'กลับบ้าน'
+            ? 'กลับบ้าน'
+            : deliveryRaw === 'ให้พ่อไปส่ง'
+              ? 'ให้พ่อไปส่ง'
+              : 'รับเองที่ร้าน';
+      const dropPointRaw = String(row.dropPoint || '').trim();
+      const tableFromRow = String(row.tableNumber || '').trim();
+      const tableFromDrop =
+        !tableFromRow && deliveryType === 'ทานนี้' && dropPointRaw.startsWith('โต๊ะที่ ')
+          ? dropPointRaw.replace(/^โต๊ะที่\s*/, '').trim()
+          : '';
+      const tableNumber = tableFromRow || tableFromDrop || undefined;
+      const paymentRaw = String(row.paymentMethod || '');
+      const paymentMethod: 'เงินสด' | 'สแกน QR' | undefined =
+        paymentRaw === 'เงินสด' ? 'เงินสด' : paymentRaw === 'สแกน QR' ? 'สแกน QR' : undefined;
+      const statusRaw = String(row.status || 'กำลังทำ');
+      const status: 'กำลังทำ' | 'เสร็จแล้ว' = statusRaw === 'เสร็จแล้ว' ? 'เสร็จแล้ว' : 'กำลังทำ';
+      const slipRaw = String(row.slipImageUrl || '').trim();
+      return {
+        queueNo: Number(row.queueNo) || idx + 1,
+        orderId: String(row.orderId || `ORD_${idx + 1}`),
+        items: parsedItems,
+        totalAmount: Number(row.totalAmount || 0) || 0,
+        totalStars: Number(row.totalStars || 0) || 0,
+        deliveryType,
+        tableNumber,
+        paymentMethod,
+        customerName: String(row.customerName || '').trim() || undefined,
+        dropPoint: dropPointRaw || undefined,
+        slipImageUrl: slipRaw || undefined,
+        accepted: String(row.accepted || '').toLowerCase() === 'true',
+        createdAt: String(row.createdAt || new Date().toISOString()),
+        status,
+      };
+    })
+    .filter((o) => o.orderId);
+}
+
+export async function fetchOnlineOrdersFromSheets(scriptUrl: string): Promise<CustomerQueueOrder[] | null> {
+  if (!scriptUrl || !scriptUrl.trim()) return null;
+  try {
+    const url = `${scriptUrl.trim()}${scriptUrl.includes('?') ? '&' : '?'}action=getOrders`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { queueOrders?: Array<Record<string, unknown>> };
+    if (!Array.isArray(data.queueOrders)) return null;
+    return mapOnlineOrderRows(data.queueOrders);
   } catch {
     return null;
   }
@@ -501,6 +604,55 @@ export function saveSaleHistoryLog(entry: SaleHistoryEntry): void {
     dateKey: entry.dateKey || getTodayDateKey(),
   });
   localStorage.setItem(STORAGE_KEYS.SALE_LOGS, JSON.stringify(existing.slice(0, 500)));
+}
+
+export function getReceiptSlipsCache(): ReceiptSlipRecord[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.RECEIPT_SLIPS);
+    return raw ? (JSON.parse(raw) as ReceiptSlipRecord[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveReceiptSlipsCache(receipts: ReceiptSlipRecord[]): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.RECEIPT_SLIPS, JSON.stringify(receipts.slice(0, 300)));
+  } catch {
+    // Ignore storage quota errors
+  }
+}
+
+export function markSaleHistoryExited(billId: string, exitedAt: string, exitedBy: string): void {
+  const existing = getSaleHistoryLogs();
+  const updated = existing.map((item) =>
+    item.id === billId ? { ...item, exitedAt, exitedBy } : item
+  );
+  localStorage.setItem(STORAGE_KEYS.SALE_LOGS, JSON.stringify(updated));
+}
+
+export function buildExitPassQrPayload(
+  receipt: Pick<ReceiptSlipRecord, 'billId' | 'totalAmount'>
+): string {
+  return `KKP_PASS:${receipt.billId}:${Math.round(receipt.totalAmount)}`;
+}
+
+export function parseExitPassCode(rawInput: string): string {
+  const trimmed = rawInput.trim();
+  if (!trimmed) return '';
+  if (trimmed.toUpperCase().startsWith('KKP_PASS:')) {
+    const parts = trimmed.split(':');
+    return (parts[1] || '').trim().toUpperCase();
+  }
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed) as { billId?: string };
+      if (parsed.billId) return String(parsed.billId).trim().toUpperCase();
+    } catch {
+      // Fallback to raw text
+    }
+  }
+  return trimmed.replace(/^#/, '').trim().toUpperCase();
 }
 
 export interface ShopDailyStats {
@@ -678,8 +830,13 @@ function doGet(e) {
       menu: readMenuRows(ss),
       staffUsers: readStaffRows(ss),
       faqs: readFaqRows(ss),
-      rewardOffers: readRewardOfferRows(ss)
+      rewardOffers: readRewardOfferRows(ss),
+      queueOrders: readOnlineOrders(ss)
     });
+  }
+
+  if (action === 'getOrders') {
+    return jsonOut({ queueOrders: readOnlineOrders(ss) });
   }
 
   if (action === 'getMenu') {
@@ -791,6 +948,33 @@ function readRewardOfferRows(ss) {
   return list;
 }
 
+function readOnlineOrders(ss) {
+  var sheet = ss.getSheetByName('ออเดอร์ออนไลน์');
+  if (!sheet) return [];
+  var rows = sheet.getDataRange().getValues();
+  var list = [];
+  for (var i = 1; i < rows.length; i++) {
+    var r = rows[i];
+    if (!r[1]) continue;
+    list.push({
+      queueNo: Number(r[0] || i),
+      orderId: String(r[1] || ''),
+      createdAt: String(r[2] || ''),
+      customerName: String(r[3] || ''),
+      deliveryType: String(r[4] || 'รับเองที่ร้าน'),
+      dropPoint: String(r[5] || ''),
+      paymentMethod: String(r[6] || 'สแกน QR'),
+      totalAmount: Number(r[7] || 0),
+      totalStars: Number(r[8] || 0),
+      itemsJson: String(r[9] || '[]'),
+      slipImageUrl: String(r[10] || ''),
+      accepted: String(r[11] || 'false'),
+      status: String(r[12] || 'กำลังทำ')
+    });
+  }
+  return list;
+}
+
 function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents);
@@ -851,6 +1035,39 @@ function doPost(e) {
       return jsonOut({ ok: true });
     }
 
+    if (tabName === 'ออเดอร์ออนไลน์') {
+      if (sheet.getLastRow() === 0) {
+        sheet.appendRow(['คิวที่', 'รหัสออเดอร์', 'เวลาสั่ง', 'ชื่อลูกค้า', 'วิธีรับ', 'จุดส่ง', 'ชำระเงิน', 'ยอดรวม', 'ดาว', 'รายการJSON', 'รูปสลิป', 'รับออเดอร์แล้ว', 'สถานะ']);
+      }
+      if (data.actionType === 'updateOrderStatus' && data.orderId) {
+        var rows = sheet.getDataRange().getValues();
+        for (var i = 1; i < rows.length; i++) {
+          if (String(rows[i][1]) === String(data.orderId)) {
+            if (data.accepted !== undefined) sheet.getRange(i + 1, 12).setValue(data.accepted ? 'true' : 'false');
+            if (data.status !== undefined) sheet.getRange(i + 1, 13).setValue(String(data.status));
+            break;
+          }
+        }
+        return jsonOut({ ok: true });
+      }
+      sheet.appendRow([
+        Number(data.queueNo || 1),
+        String(data.orderId || ''),
+        String(data.createdAt || new Date().toISOString()),
+        String(data.customerName || ''),
+        String(data.deliveryType || 'รับเองที่ร้าน'),
+        String(data.dropPoint || ''),
+        String(data.paymentMethod || 'สแกน QR'),
+        Number(data.totalAmount || 0),
+        Number(data.totalStars || 0),
+        JSON.stringify(data.items || []),
+        String(data.slipImageUrl || ''),
+        data.accepted ? 'true' : 'false',
+        String(data.status || 'กำลังทำ')
+      ]);
+      return jsonOut({ ok: true });
+    }
+
     if (sheet.getLastRow() === 0) {
       if (tabName === 'ประวัติการยกเลิก') {
         sheet.appendRow(['เวลา', 'พนักงาน', 'สิทธิ์', 'การกระทำ', 'รายละเอียด', 'มูลค่า']);
@@ -859,7 +1076,7 @@ function doPost(e) {
       } else if (tabName === 'สะสมแต้ม') {
         sheet.appendRow(['เวลา', 'รหัสสมาชิก', 'ชื่อเล่น', 'เบอร์โทร', 'รายการ', 'ดาวที่เปลี่ยน', 'ดาวคงเหลือ', 'ผู้ทำรายการ']);
       } else {
-        sheet.appendRow(['เวลา', 'เลขบิล', 'โหมด', 'ผู้ขาย', 'ช่องทาง', 'ยอดรวม', 'ดาวที่ได้', 'รายการสินค้า', 'การจัดส่ง']);
+        sheet.appendRow(['เวลา', 'เลขบิล', 'โหมด', 'ผู้ขาย', 'ช่องทาง', 'ยอดรวม', 'ดาวที่ได้', 'รายการสินค้า', 'การจัดส่ง', 'สถานะสลิป', 'รูปสลิป']);
       }
     }
 
@@ -879,7 +1096,9 @@ function doPost(e) {
         data.totalAmount || 0,
         data.totalStars || 0,
         data.itemsSummary || '',
-        data.deliveryInfo || ''
+        data.deliveryInfo || '',
+        data.slipStatus || '',
+        data.slipImageUrl || ''
       ]);
     }
     return jsonOut({ ok: true });

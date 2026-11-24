@@ -214,10 +214,12 @@ export function translateStatus(status: 'พร้อมขาย' | 'หมด'
 }
 
 export function translateDeliveryType(
-  deliveryType: 'รับเองที่ร้าน' | 'ให้พ่อไปส่ง',
+  deliveryType: 'ทานนี้' | 'กลับบ้าน' | 'รับเองที่ร้าน' | 'ให้พ่อไปส่ง',
   lang: Language
 ): string {
   if (lang === 'th') return deliveryType;
+  if (deliveryType === 'ทานนี้') return 'Dine-in';
+  if (deliveryType === 'กลับบ้าน') return 'Takeaway';
   return deliveryType === 'ให้พ่อไปส่ง' ? 'Papa Delivery' : 'Self Pick-up';
 }
 
