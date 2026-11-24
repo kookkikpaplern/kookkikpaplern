@@ -869,6 +869,7 @@ interface PaymentSuccessOverlayProps {
   mascotMode?: 'kids' | 'krua';
   outfits?: BearFamilyOutfits;
   receiptSlipEnabled?: boolean;
+  exitScannerEnabled?: boolean;
   receiptData?: ReceiptSlipRecord | null;
   onClose: () => void;
 }
@@ -885,6 +886,7 @@ export const PaymentSuccessOverlay: React.FC<PaymentSuccessOverlayProps> = ({
   mascotMode = 'kids',
   outfits,
   receiptSlipEnabled = true,
+  exitScannerEnabled = true,
   receiptData,
   onClose,
 }) => {
@@ -1195,7 +1197,7 @@ export const PaymentSuccessOverlay: React.FC<PaymentSuccessOverlayProps> = ({
 
         {/* Digital & Printable Receipt Slip with Gate Exit QR */}
         {receiptSlipEnabled && receiptData ? (
-          <ReceiptSlipCard receipt={receiptData} />
+          <ReceiptSlipCard receipt={receiptData} exitScannerEnabled={exitScannerEnabled} />
         ) : !receiptSlipEnabled ? (
           <div className="rounded-2xl bg-white/15 border border-white/25 px-4 py-3 text-center text-sm font-semibold text-emerald-50 flex items-center justify-center gap-2 print:hidden">
             <PauseCircle className="w-4 h-4 shrink-0" />

@@ -7,16 +7,25 @@ import { playSoftClick } from '../utils/sound';
 
 interface ReceiptSlipCardProps {
   receipt: ReceiptSlipRecord;
+  exitScannerEnabled?: boolean;
 }
 
-export const ReceiptSlipCard: React.FC<ReceiptSlipCardProps> = ({ receipt }) => {
+export const ReceiptSlipCard: React.FC<ReceiptSlipCardProps> = ({
+  receipt,
+  exitScannerEnabled = true,
+}) => {
   const { lang, tx } = useLang();
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [downloading, setDownloading] = useState(false);
 
+  const showExitGateQr = exitScannerEnabled || Boolean(receipt.exitedAt);
   const qrPayload = buildExitPassQrPayload(receipt);
 
   useEffect(() => {
+    if (!showExitGateQr) {
+      setQrDataUrl('');
+      return;
+    }
     let active = true;
     QRCode.toDataURL(qrPayload, {
       width: 280,
@@ -37,7 +46,7 @@ export const ReceiptSlipCard: React.FC<ReceiptSlipCardProps> = ({ receipt }) => 
     return () => {
       active = false;
     };
-  }, [qrPayload]);
+  }, [qrPayload, showExitGateQr]);
 
   const handleDownloadSlipPng = async () => {
     playSoftClick();
@@ -49,10 +58,14 @@ export const ReceiptSlipCard: React.FC<ReceiptSlipCardProps> = ({ receipt }) => 
 
       const width = 560;
       const lineHeight = 32;
-      const baseHeight = 560 + items.length * lineHeight + (receipt.deliveryInfo ? 34 : 0) + (receipt.bankAccountLabel ? 30 : 0);
+      const baseHeight =
+        (showExitGateQr ? 560 : 370) +
+        items.length * lineHeight +
+        (receipt.deliveryInfo ? 34 : 0) +
+        (receipt.bankAccountLabel ? 30 : 0);
       const canvas = document.createElement('canvas');
       canvas.width = width;
-      canvas.height = Math.max(680, baseHeight);
+      canvas.height = Math.max(showExitGateQr ? 680 : 480, baseHeight);
       const ctx = canvas.getContext('2d');
       if (!ctx) return;
 
@@ -73,7 +86,13 @@ export const ReceiptSlipCard: React.FC<ReceiptSlipCardProps> = ({ receipt }) => 
       y += 30;
       ctx.fillStyle = '#57534E';
       ctx.font = '18px sans-serif';
-      ctx.fillText(tx('ใบเสร็จรับเงิน & บัตรสแกนผ่านประตู', 'Receipt Slip & Exit Gate Pass'), width / 2, y);
+      ctx.fillText(
+        showExitGateQr
+          ? tx('ใบเสร็จรับเงิน & บัตรสแกนผ่านประตู', 'Receipt Slip & Exit Gate Pass')
+          : tx('ใบเสร็จรับเงิน', 'Official Receipt Slip'),
+        width / 2,
+        y
+      );
 
       y += 32;
       ctx.fillStyle = '#047857';
@@ -150,30 +169,42 @@ export const ReceiptSlipCard: React.FC<ReceiptSlipCardProps> = ({ receipt }) => 
       ctx.font = 'bold 17px sans-serif';
       ctx.fillText(tx(`ได้รับดาวสะสม +${receipt.totalStars} ดาว`, `Earned +${receipt.totalStars} Stars`), 38, y);
 
-      y += 24;
-      drawDivider(y);
-      y += 24;
+      if (showExitGateQr) {
+        y += 24;
+        drawDivider(y);
+        y += 24;
 
-      if (qrDataUrl) {
-        const qrImg = await new Promise<HTMLImageElement>((resolve, reject) => {
-          const img = new Image();
-          img.onload = () => resolve(img);
-          img.onerror = reject;
-          img.src = qrDataUrl;
-        });
-        const qrSize = 188;
-        ctx.drawImage(qrImg, (width - qrSize) / 2, y, qrSize, qrSize);
-        y += qrSize + 24;
+        if (qrDataUrl) {
+          const qrImg = await new Promise<HTMLImageElement>((resolve, reject) => {
+            const img = new Image();
+            img.onload = () => resolve(img);
+            img.onerror = reject;
+            img.src = qrDataUrl;
+          });
+          const qrSize = 188;
+          ctx.drawImage(qrImg, (width - qrSize) / 2, y, qrSize, qrSize);
+          y += qrSize + 24;
+        }
+
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#065F46';
+        ctx.font = 'bold 17px sans-serif';
+        ctx.fillText(
+          tx('แสดง QR นี้ให้พนักงาน / คุณแม่สแกนก่อนออกประตูร้าน', 'Show this QR at the exit gate for verification'),
+          width / 2,
+          y
+        );
+      } else {
+        y += 36;
+        ctx.textAlign = 'center';
+        ctx.fillStyle = '#57534E';
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillText(
+          tx('ขอบคุณที่อุดหนุนนะคะ / Thank you!', 'Thank you for visiting our shop!'),
+          width / 2,
+          y
+        );
       }
-
-      ctx.textAlign = 'center';
-      ctx.fillStyle = '#065F46';
-      ctx.font = 'bold 17px sans-serif';
-      ctx.fillText(
-        tx('แสดง QR นี้ให้พนักงาน / คุณแม่สแกนก่อนออกประตูร้าน', 'Show this QR at the exit gate for verification'),
-        width / 2,
-        y
-      );
 
       const link = document.createElement('a');
       link.download = `slip-${receipt.billId}.png`;
@@ -199,7 +230,9 @@ export const ReceiptSlipCard: React.FC<ReceiptSlipCardProps> = ({ receipt }) => 
         <div className="min-w-0">
           <div className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-50 text-emerald-800 text-xs font-bold mb-1.5">
             <Receipt className="w-3.5 h-3.5" />
-            {tx('ใบเสร็จ / ใบสลิปผ่านประตู', 'Receipt & Exit Gate Slip')}
+            {showExitGateQr
+              ? tx('ใบเสร็จ / ใบสลิปผ่านประตู', 'Receipt & Exit Gate Slip')
+              : tx('ใบเสร็จรับเงิน', 'Receipt Slip')}
           </div>
           <h3 className="text-lg font-extrabold text-stone-900 truncate">{receipt.shopName}</h3>
           <p className="text-xs text-stone-500">{receipt.timestamp}</p>
@@ -282,53 +315,55 @@ export const ReceiptSlipCard: React.FC<ReceiptSlipCardProps> = ({ receipt }) => 
       </div>
 
       {/* Gate Exit Pass QR Section */}
-      <div
-        className={`rounded-2xl border-2 p-4 flex flex-col sm:flex-row items-center gap-4 ${
-          receipt.exitedAt
-            ? 'bg-emerald-50 border-emerald-300'
-            : 'bg-[#FAF6F0] border-emerald-200'
-        }`}
-      >
-        <div className="w-36 h-36 rounded-2xl bg-white border border-stone-200 p-2 flex items-center justify-center shrink-0 shadow-sm">
-          {qrDataUrl ? (
-            <img
-              src={qrDataUrl}
-              alt={tx('QR สแกนผ่านประตู', 'Exit Gate QR Code')}
-              className="w-full h-full object-contain"
-            />
-          ) : (
-            <QrCode className="w-12 h-12 text-stone-400" />
-          )}
-        </div>
+      {showExitGateQr && (
+        <div
+          className={`rounded-2xl border-2 p-4 flex flex-col sm:flex-row items-center gap-4 ${
+            receipt.exitedAt
+              ? 'bg-emerald-50 border-emerald-300'
+              : 'bg-[#FAF6F0] border-emerald-200'
+          }`}
+        >
+          <div className="w-36 h-36 rounded-2xl bg-white border border-stone-200 p-2 flex items-center justify-center shrink-0 shadow-sm">
+            {qrDataUrl ? (
+              <img
+                src={qrDataUrl}
+                alt={tx('QR สแกนผ่านประตู', 'Exit Gate QR Code')}
+                className="w-full h-full object-contain"
+              />
+            ) : (
+              <QrCode className="w-12 h-12 text-stone-400" />
+            )}
+          </div>
 
-        <div className="flex-1 text-center sm:text-left space-y-1.5">
-          {receipt.exitedAt ? (
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-emerald-600 text-white text-xs font-bold">
-              <CheckCircle2 className="w-4 h-4" />
-              {tx('สแกนผ่านประตูเรียบร้อยแล้ว', 'Exit Gate Verified')}
-            </div>
-          ) : (
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-emerald-100 text-emerald-800 text-xs font-bold">
-              <QrCode className="w-3.5 h-3.5" />
-              {tx('QR สแกนผ่านประตูออกร้าน', 'Exit Gate Pass QR')}
-            </div>
-          )}
-          <p className="text-sm font-bold text-stone-800">
-            {receipt.exitedAt
-              ? tx(
-                  `ตรวจผ่านประตูแล้ว${receipt.exitedBy ? ` โดย ${receipt.exitedBy}` : ''}`,
-                  `Verified at exit${receipt.exitedBy ? ` by ${receipt.exitedBy}` : ''}`
-                )
-              : tx(
-                  'แสดงใบสลิปนี้ให้คุณแม่หรือพนักงานสแกนก่อนออกประตูนะคะ',
-                  'Please show this QR slip to staff/Mom at the exit gate before leaving.'
-                )}
-          </p>
-          <p className="font-num text-xs text-stone-500">
-            {tx('รหัสผ่านประตู:', 'Pass Code:')} {receipt.billId}
-          </p>
+          <div className="flex-1 text-center sm:text-left space-y-1.5">
+            {receipt.exitedAt ? (
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-emerald-600 text-white text-xs font-bold">
+                <CheckCircle2 className="w-4 h-4" />
+                {tx('สแกนผ่านประตูเรียบร้อยแล้ว', 'Exit Gate Verified')}
+              </div>
+            ) : (
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-emerald-100 text-emerald-800 text-xs font-bold">
+                <QrCode className="w-3.5 h-3.5" />
+                {tx('QR สแกนผ่านประตูออกร้าน', 'Exit Gate Pass QR')}
+              </div>
+            )}
+            <p className="text-sm font-bold text-stone-800">
+              {receipt.exitedAt
+                ? tx(
+                    `ตรวจผ่านประตูแล้ว${receipt.exitedBy ? ` โดย ${receipt.exitedBy}` : ''}`,
+                    `Verified at exit${receipt.exitedBy ? ` by ${receipt.exitedBy}` : ''}`
+                  )
+                : tx(
+                    'แสดงใบสลิปนี้ให้คุณแม่หรือพนักงานสแกนก่อนออกประตูนะคะ',
+                    'Please show this QR slip to staff/Mom at the exit gate before leaving.'
+                  )}
+            </p>
+            <p className="font-num text-xs text-stone-500">
+              {tx('รหัสผ่านประตู:', 'Pass Code:')} {receipt.billId}
+            </p>
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Save PNG & Print Actions (hidden when printing) */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1 print:hidden">

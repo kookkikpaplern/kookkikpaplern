@@ -113,6 +113,8 @@ interface AdminSettingsModalProps {
   onToggleOnlineOrder: (val: boolean) => void;
   receiptSlipEnabled: boolean;
   onToggleReceiptSlip: (val: boolean) => void;
+  exitScannerEnabled: boolean;
+  onToggleExitScanner: (val: boolean) => void;
   isTestMode: boolean;
   onToggleTestMode: (val: boolean) => void;
   enableAutoPaymentCheck: boolean;
@@ -171,6 +173,8 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   onToggleOnlineOrder,
   receiptSlipEnabled,
   onToggleReceiptSlip,
+  exitScannerEnabled,
+  onToggleExitScanner,
   isTestMode,
   onToggleTestMode,
   enableAutoPaymentCheck,
@@ -622,6 +626,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
           faqModalSubtitle,
           onlineOrderEnabled: String(onlineOrderEnabled),
           receiptSlipEnabled: String(receiptSlipEnabled),
+          exitScannerEnabled: String(exitScannerEnabled),
           enableAutoPaymentCheck: String(enableAutoPaymentCheck),
         },
       }),
@@ -679,6 +684,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
         faqModalSubtitle,
         onlineOrderEnabled: String(onlineOrderEnabled),
         receiptSlipEnabled: String(receiptSlipEnabled),
+        exitScannerEnabled: String(exitScannerEnabled),
         enableAutoPaymentCheck: String(enableAutoPaymentCheck),
       },
     });
@@ -926,6 +932,29 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                     type="checkbox"
                     checked={receiptSlipEnabled}
                     onChange={(e) => onToggleReceiptSlip(e.target.checked)}
+                    className="w-6 h-6 accent-emerald-600 cursor-pointer"
+                  />
+                </label>
+
+                <label
+                  className="flex items-center justify-between gap-4 p-4 rounded-2xl border cursor-pointer"
+                  style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                >
+                  <div>
+                    <p className="font-bold text-sm" style={{ color: 'var(--text-main)' }}>
+                      {tx('เปิดระบบสแกนใบสลิปผ่านประตู (สำหรับคุณแม่ / พนักงาน)', 'Enable Exit Gate Slip Scanner')}
+                    </p>
+                    <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                      {tx(
+                        'กดใช้หรือหยุดใช้ชั่วคราวได้เมื่อไม่ได้ตรวจสลิปที่ประตู (สลับจากปุ่มบนแถบหน้าคิดเงินได้ทันทีค่ะ)',
+                        'Pause or resume exit gate QR scanning anytime from the top toolbar or here'
+                      )}
+                    </p>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={exitScannerEnabled}
+                    onChange={(e) => onToggleExitScanner(e.target.checked)}
                     className="w-6 h-6 accent-emerald-600 cursor-pointer"
                   />
                 </label>

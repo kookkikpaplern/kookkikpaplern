@@ -4,6 +4,8 @@ import {
   CheckCircle2,
   Clock,
   Keyboard,
+  PauseCircle,
+  PlayCircle,
   QrCode,
   ScanLine,
   ShieldAlert,
@@ -18,6 +20,8 @@ interface ExitSlipScannerModalProps {
   onClose: () => void;
   receipts: ReceiptSlipRecord[];
   staffName: string;
+  exitScannerEnabled: boolean;
+  onToggleExitScanner: (next: boolean) => void;
   onMarkReceiptExited: (billId: string) => void;
 }
 
@@ -39,6 +43,8 @@ export const ExitSlipScannerModal: React.FC<ExitSlipScannerModalProps> = ({
   isOpen,
   onClose,
   receipts,
+  exitScannerEnabled,
+  onToggleExitScanner,
   onMarkReceiptExited,
 }) => {
   const { lang, tx } = useLang();
@@ -100,6 +106,9 @@ export const ExitSlipScannerModal: React.FC<ExitSlipScannerModalProps> = ({
     if (!isOpen) {
       setVerification({ status: 'idle' });
       setManualCode('');
+      return;
+    }
+    if (!exitScannerEnabled) {
       return;
     }
 
@@ -174,7 +183,7 @@ export const ExitSlipScannerModal: React.FC<ExitSlipScannerModalProps> = ({
         stream.getTracks().forEach((t) => t.stop());
       }
     };
-  }, [isOpen, verifySlipCode]);
+  }, [isOpen, exitScannerEnabled, verifySlipCode]);
 
   if (!isOpen) return null;
 
@@ -219,15 +228,43 @@ export const ExitSlipScannerModal: React.FC<ExitSlipScannerModalProps> = ({
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-11 h-11 rounded-2xl border flex items-center justify-center cursor-pointer"
-            style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
-            aria-label={tx('ปิดหน้าต่าง', 'Close')}
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => {
+                playSoftClick();
+                onToggleExitScanner(!exitScannerEnabled);
+              }}
+              className="px-3 py-2 rounded-2xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer transition-transform active:scale-95"
+              style={{
+                backgroundColor: exitScannerEnabled ? '#ECFDF5' : '#FFF1F2',
+                borderColor: exitScannerEnabled ? '#A7F3D0' : '#FECDD3',
+                color: exitScannerEnabled ? '#065F46' : '#9F1239',
+              }}
+            >
+              {exitScannerEnabled ? (
+                <>
+                  <PauseCircle className="w-4 h-4 shrink-0" />
+                  {tx('เปิดใช้อยู่ (กดหยุดใช้)', 'Active (Pause)')}
+                </>
+              ) : (
+                <>
+                  <PlayCircle className="w-4 h-4 shrink-0" />
+                  {tx('หยุดใช้อยู่ (กดเปิดใช้)', 'Paused (Resume)')}
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-11 h-11 rounded-2xl border flex items-center justify-center cursor-pointer"
+              style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+              aria-label={tx('ปิดหน้าต่าง', 'Close')}
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
         {/* Scrollable Content */}
@@ -327,37 +364,76 @@ export const ExitSlipScannerModal: React.FC<ExitSlipScannerModalProps> = ({
             </div>
           )}
 
-          {/* Camera Viewport */}
-          <div className="relative aspect-video w-full rounded-2xl overflow-hidden bg-stone-900 flex items-center justify-center">
-            <video ref={videoRef} playsInline muted className="w-full h-full object-cover" />
-            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-              <div className="w-48 h-48 rounded-2xl border-2 border-dashed border-emerald-300/95 bg-emerald-400/5 flex items-center justify-center">
-                <QrCode className="w-8 h-8 text-emerald-300/60" />
+          {/* Camera Viewport or Paused Banner */}
+          {!exitScannerEnabled ? (
+            <div
+              className="rounded-2xl border-2 border-dashed p-6 text-center space-y-3"
+              style={{
+                backgroundColor: '#FFF1F2',
+                borderColor: '#FECDD3',
+                color: '#9F1239',
+              }}
+            >
+              <div className="w-12 h-12 rounded-2xl bg-white/80 mx-auto flex items-center justify-center shadow-sm">
+                <PauseCircle className="w-7 h-7 text-rose-600" />
               </div>
-            </div>
-            {cameraError && (
-              <div className="absolute inset-0 bg-stone-900/90 flex flex-col items-center justify-center p-6 text-center text-white text-sm gap-2">
-                <Camera className="w-7 h-7 text-emerald-300" />
-                <p>
+              <div className="space-y-1">
+                <p className="text-base font-extrabold">
+                  {tx('ระบบสแกนสลิปผ่านประตูถูกกดหยุดใช้ชั่วคราว', 'Exit Gate Slip Scanner Is Paused')}
+                </p>
+                <p className="text-xs text-rose-800">
                   {tx(
-                    'ไม่สามารถเปิดกล้องได้ กรุณาอนุญาตการใช้กล้อง หรือพิมพ์เลขบิล (เช่น B123456) ด้านล่างค่ะ',
-                    'Cannot access camera. Please allow camera access or type the Bill ID below.'
+                    'กล้องสแกนและคิวอาร์โค้ดผ่านประตูบนสลิปใหม่ถูกปิดไว้ชั่วคราว สามารถกดเปิดใช้งานใหม่ได้ทันทีค่ะ',
+                    'Camera scanning and exit QR codes on new slips are paused. Tap below to resume anytime.'
                   )}
                 </p>
               </div>
-            )}
-          </div>
+              <button
+                type="button"
+                onClick={() => {
+                  playSoftClick();
+                  onToggleExitScanner(true);
+                }}
+                className="px-5 h-11 rounded-2xl font-bold text-white bg-emerald-600 hover:bg-emerald-700 inline-flex items-center gap-2 cursor-pointer shadow-sm"
+              >
+                <PlayCircle className="w-4 h-4" />
+                {tx('กดเปิดใช้สแกนสลิปผ่านประตู', 'Resume Exit Slip Scanner')}
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="relative aspect-video w-full rounded-2xl overflow-hidden bg-stone-900 flex items-center justify-center">
+                <video ref={videoRef} playsInline muted className="w-full h-full object-cover" />
+                <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                  <div className="w-48 h-48 rounded-2xl border-2 border-dashed border-emerald-300/95 bg-emerald-400/5 flex items-center justify-center">
+                    <QrCode className="w-8 h-8 text-emerald-300/60" />
+                  </div>
+                </div>
+                {cameraError && (
+                  <div className="absolute inset-0 bg-stone-900/90 flex flex-col items-center justify-center p-6 text-center text-white text-sm gap-2">
+                    <Camera className="w-7 h-7 text-emerald-300" />
+                    <p>
+                      {tx(
+                        'ไม่สามารถเปิดกล้องได้ กรุณาอนุญาตการใช้กล้อง หรือพิมพ์เลขบิล (เช่น B123456) ด้านล่างค่ะ',
+                        'Cannot access camera. Please allow camera access or type the Bill ID below.'
+                      )}
+                    </p>
+                  </div>
+                )}
+              </div>
 
-          {!supportsDetector && !cameraError && (
-            <p
-              className="text-xs px-3 py-2 rounded-xl text-center"
-              style={{ backgroundColor: 'var(--pastel-peach)', color: 'var(--pastel-peach-text)' }}
-            >
-              {tx(
-                'เบราว์เซอร์นี้ไม่รองรับการอ่าน QR อัตโนมัติจากกล้อง สามารถพิมพ์เลขบิล (เช่น B123456) หรือกดยืนยันจากรายการล่าสุดด้านล่างได้เลยค่ะ',
-                'Camera auto-QR is unsupported in this browser. Enter the Bill ID or tap a recent slip below.'
+              {!supportsDetector && !cameraError && (
+                <p
+                  className="text-xs px-3 py-2 rounded-xl text-center"
+                  style={{ backgroundColor: 'var(--pastel-peach)', color: 'var(--pastel-peach-text)' }}
+                >
+                  {tx(
+                    'เบราว์เซอร์นี้ไม่รองรับการอ่าน QR อัตโนมัติจากกล้อง สามารถพิมพ์เลขบิล (เช่น B123456) หรือกดยืนยันจากรายการล่าสุดด้านล่างได้เลยค่ะ',
+                    'Camera auto-QR is unsupported in this browser. Enter the Bill ID or tap a recent slip below.'
+                  )}
+                </p>
               )}
-            </p>
+            </>
           )}
 
           {/* Manual Bill ID Entry */}

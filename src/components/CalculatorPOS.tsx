@@ -38,7 +38,10 @@ interface CalculatorPOSProps {
   onOpenScanner: () => void;
   onOpenCashModal: (total: number) => void;
   onOpenQrModal: (total: number) => void;
+  onOpenAiBuddy?: () => void;
 }
+
+type CalcOp = '+' | '-' | '×' | '÷';
 
 export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
   billItems,
@@ -49,10 +52,15 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
   onOpenScanner,
   onOpenCashModal,
   onOpenQrModal,
+  onOpenAiBuddy,
 }) => {
   const { lang, tx } = useLang();
   const [inputValue, setInputValue] = useState('0');
-  const [pendingSum, setPendingSum] = useState<number | null>(null);
+  const [pendingLeft, setPendingLeft] = useState<number | null>(null);
+  const [pendingOp, setPendingOp] = useState<CalcOp | null>(null);
+  const [awaitingSecondOperand, setAwaitingSecondOperand] = useState(false);
+  const [justEvaluated, setJustEvaluated] = useState(false);
+  const [calcError, setCalcError] = useState('');
 
   // ภาพความสุขระหว่างรอ (เช่น ทริปญี่ปุ่นของแม่) — ซ่อนอัตโนมัติทันทีที่เริ่มคิดเงิน
   const memoryInputRef = useRef<HTMLInputElement>(null);
@@ -78,7 +86,7 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
   const [activePhotoIdx, setActivePhotoIdx] = useState(0);
   const [photoError, setPhotoError] = useState('');
 
-  const isCharging = billItems.length > 0 || inputValue !== '0' || pendingSum !== null;
+  const isCharging = billItems.length > 0 || inputValue !== '0' || pendingOp !== null;
 
   useEffect(() => {
     if (activePhotoIdx >= memoryPhotos.length && memoryPhotos.length > 0) {
@@ -152,48 +160,142 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
     setActivePhotoIdx((prev) => (next.length === 0 ? 0 : Math.min(prev, next.length - 1)));
   };
 
+  const computeBinary = (left: number, op: CalcOp, right: number): number | null => {
+    if (op === '÷' && right === 0) {
+      return null;
+    }
+    let raw = 0;
+    if (op === '+') raw = left + right;
+    else if (op === '-') raw = left - right;
+    else if (op === '×') raw = left * right;
+    else if (op === '÷') raw = left / right;
+    return Number(raw.toFixed(6));
+  };
+
+  const formatCalcNumber = (num: number): string => {
+    const rounded = Math.round(num * 100) / 100;
+    return String(rounded);
+  };
+
+  const resolvePendingCalculation = (): { ok: boolean; value: number } => {
+    const rightVal = parseFloat(inputValue) || 0;
+    if (pendingOp !== null && pendingLeft !== null) {
+      if (awaitingSecondOperand) {
+        return { ok: true, value: pendingLeft };
+      }
+      const computed = computeBinary(pendingLeft, pendingOp, rightVal);
+      if (computed === null) {
+        setCalcError(tx('หารด้วย 0 ไม่ได้ค่ะ', 'Cannot divide by zero'));
+        return { ok: false, value: 0 };
+      }
+      return { ok: true, value: Math.round(computed * 100) / 100 };
+    }
+    return { ok: true, value: Math.round(rightVal * 100) / 100 };
+  };
+
   const billTotal = billItems.reduce((sum, item) => sum + item.price * item.qty, 0);
   const currentEntry = parseFloat(inputValue) || 0;
-  const displayAmount = billTotal + (pendingSum ?? 0) + (billTotal === 0 || pendingSum !== null || inputValue !== '0' ? currentEntry : 0);
+  const effectiveCalcAmount =
+    pendingOp !== null && pendingLeft !== null
+      ? awaitingSecondOperand
+        ? pendingLeft
+        : (computeBinary(pendingLeft, pendingOp, currentEntry) ?? currentEntry)
+      : currentEntry;
+  const roundedEffectiveCalc = Math.round(effectiveCalcAmount * 100) / 100;
+  const displayAmount = Math.max(
+    0,
+    Math.round((billTotal + (roundedEffectiveCalc > 0 ? roundedEffectiveCalc : 0)) * 100) / 100
+  );
 
   const handleDigit = (d: string) => {
     playSoftClick();
+    setCalcError('');
+    if (awaitingSecondOperand || justEvaluated) {
+      setAwaitingSecondOperand(false);
+      setJustEvaluated(false);
+      setInputValue(d === '.' ? '0.' : d);
+      return;
+    }
     if (d === '.' && inputValue.includes('.')) return;
     if (inputValue === '0' && d !== '.') {
       setInputValue(d);
-    } else if (inputValue.length < 8) {
+    } else if (inputValue.length < 10) {
       setInputValue(inputValue + d);
     }
   };
 
   const handleBackspace = () => {
     playSoftClick();
-    if (inputValue.length <= 1) {
+    setCalcError('');
+    if (awaitingSecondOperand) {
+      setPendingOp(null);
+      setPendingLeft(null);
+      setAwaitingSecondOperand(false);
+      return;
+    }
+    setJustEvaluated(false);
+    if (inputValue.length <= 1 || (inputValue.length === 2 && inputValue.startsWith('-'))) {
       setInputValue('0');
     } else {
       setInputValue(inputValue.slice(0, -1));
     }
   };
 
-  const handlePlus = () => {
+  const handleOperator = (nextOp: CalcOp) => {
     playSoftClick();
-    const val = parseFloat(inputValue) || 0;
-    if (val > 0) {
-      onAddManualAmount(
-        val,
-        tx(
-          `รายการคิดเงิน ฿${val.toLocaleString('th-TH')}`,
-          `Manual Item ฿${val.toLocaleString('en-US')}`
-        )
-      );
-      setInputValue('0');
-      setPendingSum(null);
+    setCalcError('');
+    const currentVal = parseFloat(inputValue) || 0;
+
+    if (pendingOp !== null && pendingLeft !== null) {
+      if (awaitingSecondOperand) {
+        setPendingOp(nextOp);
+        return;
+      }
+      const computed = computeBinary(pendingLeft, pendingOp, currentVal);
+      if (computed === null) {
+        setCalcError(tx('หารด้วย 0 ไม่ได้ค่ะ', 'Cannot divide by zero'));
+        return;
+      }
+      const formatted = formatCalcNumber(computed);
+      setInputValue(formatted);
+      setPendingLeft(computed);
+      setPendingOp(nextOp);
+      setAwaitingSecondOperand(true);
+      setJustEvaluated(false);
+      return;
     }
+
+    setPendingLeft(currentVal);
+    setPendingOp(nextOp);
+    setAwaitingSecondOperand(true);
+    setJustEvaluated(false);
   };
 
   const handleEquals = () => {
     playSoftClick();
-    const val = parseFloat(inputValue) || 0;
+    setCalcError('');
+    if (pendingOp === null || pendingLeft === null) return;
+    const rightVal = parseFloat(inputValue) || 0;
+    const computed = awaitingSecondOperand
+      ? pendingLeft
+      : computeBinary(pendingLeft, pendingOp, rightVal);
+    if (computed === null) {
+      setCalcError(tx('หารด้วย 0 ไม่ได้ค่ะ', 'Cannot divide by zero'));
+      return;
+    }
+    setInputValue(formatCalcNumber(computed));
+    setPendingLeft(null);
+    setPendingOp(null);
+    setAwaitingSecondOperand(false);
+    setJustEvaluated(true);
+  };
+
+  const handleAddToBill = () => {
+    playSoftClick();
+    setCalcError('');
+    const resolved = resolvePendingCalculation();
+    if (!resolved.ok) return;
+    const val = resolved.value;
     if (val > 0) {
       onAddManualAmount(
         val,
@@ -203,20 +305,44 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
         )
       );
       setInputValue('0');
-      setPendingSum(null);
+      setPendingLeft(null);
+      setPendingOp(null);
+      setAwaitingSecondOperand(false);
+      setJustEvaluated(false);
     }
+  };
+
+  const handleClearCalculatorOrBill = () => {
+    playSoftClick();
+    setCalcError('');
+    if (inputValue !== '0' || pendingOp !== null || pendingLeft !== null) {
+      setInputValue('0');
+      setPendingLeft(null);
+      setPendingOp(null);
+      setAwaitingSecondOperand(false);
+      setJustEvaluated(false);
+      return;
+    }
+    onClearBill();
   };
 
   const handleResetAll = () => {
     playSoftClick();
+    setCalcError('');
     setInputValue('0');
-    setPendingSum(null);
+    setPendingLeft(null);
+    setPendingOp(null);
+    setAwaitingSecondOperand(false);
+    setJustEvaluated(false);
     onClearBill();
   };
 
   const commitAndPay = (method: 'cash' | 'qr') => {
     playSoftClick();
-    const val = parseFloat(inputValue) || 0;
+    setCalcError('');
+    const resolved = resolvePendingCalculation();
+    if (!resolved.ok) return;
+    const val = resolved.value;
     let finalTotal = billTotal;
     if (val > 0) {
       onAddManualAmount(
@@ -226,9 +352,12 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
           `Manual Item ฿${val.toLocaleString('en-US')}`
         )
       );
-      finalTotal += val;
+      finalTotal = Math.round((finalTotal + val) * 100) / 100;
       setInputValue('0');
-      setPendingSum(null);
+      setPendingLeft(null);
+      setPendingOp(null);
+      setAwaitingSecondOperand(false);
+      setJustEvaluated(false);
     }
     if (finalTotal <= 0) return;
     if (method === 'cash') {
@@ -237,6 +366,22 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
       onOpenQrModal(finalTotal);
     }
   };
+
+  const expressionLabel =
+    pendingOp !== null && pendingLeft !== null
+      ? awaitingSecondOperand
+        ? `${pendingLeft.toLocaleString('th-TH')} ${pendingOp}`
+        : `${pendingLeft.toLocaleString('th-TH')} ${pendingOp} ${inputValue}`
+      : inputValue !== '0'
+        ? tx(`กำลังคิดเลข: ฿${inputValue}`, `Calculating: ฿${inputValue}`)
+        : tx('ยอดรวมทั้งหมด', 'Grand Total');
+
+  const mainCalcDisplay =
+    pendingOp !== null || justEvaluated || inputValue !== '0'
+      ? Number.isFinite(parseFloat(inputValue))
+        ? inputValue
+        : '0'
+      : billTotal.toLocaleString('th-TH', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
@@ -250,18 +395,29 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
       >
         {/* Display Panel */}
         <div
-          className="rounded-2xl border p-4 sm:p-5 flex flex-col justify-between min-h-[124px]"
+          className="rounded-2xl border p-4 sm:p-5 flex flex-col justify-between min-h-[128px]"
           style={{
             backgroundColor: 'var(--bg-canvas)',
             borderColor: 'var(--border-soft)',
           }}
         >
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-sm font-medium" style={{ color: 'var(--text-muted)' }}>
-              {inputValue !== '0'
-                ? tx(`กำลังพิมพ์: ฿${inputValue}`, `Typing: ฿${inputValue}`)
-                : tx('ยอดรวมทั้งหมด', 'Grand Total')}
-            </span>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0">
+              <span className="text-sm font-num font-semibold block truncate" style={{ color: 'var(--text-muted)' }}>
+                {expressionLabel}
+              </span>
+              {billTotal > 0 && (pendingOp !== null || justEvaluated || inputValue !== '0') && (
+                <span className="text-xs font-medium" style={{ color: 'var(--accent-text)' }}>
+                  {tx(
+                    `ในบิลเดิม ฿${billTotal.toLocaleString('th-TH')} · รวมทั้งหมด ฿${displayAmount.toLocaleString('th-TH')}`,
+                    `Bill ฿${billTotal.toLocaleString('en-US')} · Combined ฿${displayAmount.toLocaleString('en-US')}`
+                  )}
+                </span>
+              )}
+              {calcError && (
+                <span className="text-xs font-bold text-rose-600 block mt-0.5">{calcError}</span>
+              )}
+            </div>
             <button
               type="button"
               onClick={onOpenScanner}
@@ -281,33 +437,35 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
               className="font-num text-4xl sm:text-5xl font-bold tracking-tight tabular-nums"
               style={{ color: 'var(--text-main)' }}
             >
-              ฿{displayAmount.toLocaleString('th-TH', { minimumFractionDigits: 0, maximumFractionDigits: 2 })}
+              {pendingOp === null && !justEvaluated && inputValue === '0' ? '฿' : ''}
+              {mainCalcDisplay}
             </span>
           </div>
         </div>
 
-        {/* Large Senior-Friendly Numpad */}
+        {/* Large Senior-Friendly Full Arithmetic + POS Numpad (5 rows x 4 cols) */}
         <div className="grid grid-cols-4 gap-3">
-          {['7', '8', '9'].map((d) => (
-            <button
-              key={d}
-              type="button"
-              onClick={() => handleDigit(d)}
-              className="h-16 sm:h-[72px] rounded-2xl border text-2xl sm:text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
-              style={{
-                backgroundColor: 'var(--bg-canvas)',
-                borderColor: 'var(--border-soft)',
-                color: 'var(--text-main)',
-              }}
-            >
-              {d}
-            </button>
-          ))}
+          {/* Row 1: Clear, Backspace, ÷, × */}
+          <button
+            type="button"
+            onClick={handleClearCalculatorOrBill}
+            className="h-16 sm:h-[70px] rounded-2xl border text-base font-bold flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-transform active:scale-95"
+            style={{
+              backgroundColor: 'var(--pastel-peach)',
+              borderColor: 'var(--border-soft)',
+              color: 'var(--pastel-peach-text)',
+            }}
+            title={tx('ล้างเลขบนจอ (กดซ้ำเพื่อล้างบิล)', 'Clear entry (tap again to clear bill)')}
+          >
+            <RotateCcw className="w-4 h-4" />
+            {inputValue !== '0' || pendingOp !== null ? tx('C ล้างเลข', 'Clear') : tx('ล้างค่า', 'Reset')}
+          </button>
+
           <button
             type="button"
             onClick={handleBackspace}
             aria-label={tx('ลบตัวเลข', 'Backspace')}
-            className="h-16 sm:h-[72px] rounded-2xl border flex items-center justify-center cursor-pointer transition-transform active:scale-95"
+            className="h-16 sm:h-[70px] rounded-2xl border flex items-center justify-center cursor-pointer transition-transform active:scale-95"
             style={{
               backgroundColor: 'var(--bg-subtle)',
               borderColor: 'var(--border-soft)',
@@ -317,12 +475,71 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
             <Delete className="w-6 h-6" />
           </button>
 
+          <button
+            type="button"
+            onClick={() => handleOperator('÷')}
+            aria-label={tx('หาร', 'Divide')}
+            className="h-16 sm:h-[70px] rounded-2xl border-2 text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
+            style={{
+              backgroundColor: pendingOp === '÷' ? 'var(--accent-primary)' : 'var(--accent-soft)',
+              borderColor: 'var(--accent-border)',
+              color: pendingOp === '÷' ? '#FFFFFF' : 'var(--accent-text)',
+            }}
+          >
+            ÷
+          </button>
+
+          <button
+            type="button"
+            onClick={() => handleOperator('×')}
+            aria-label={tx('คูณ', 'Multiply')}
+            className="h-16 sm:h-[70px] rounded-2xl border-2 text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
+            style={{
+              backgroundColor: pendingOp === '×' ? 'var(--accent-primary)' : 'var(--accent-soft)',
+              borderColor: 'var(--accent-border)',
+              color: pendingOp === '×' ? '#FFFFFF' : 'var(--accent-text)',
+            }}
+          >
+            ×
+          </button>
+
+          {/* Row 2: 7, 8, 9, − */}
+          {['7', '8', '9'].map((d) => (
+            <button
+              key={d}
+              type="button"
+              onClick={() => handleDigit(d)}
+              className="h-16 sm:h-[70px] rounded-2xl border text-2xl sm:text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
+              style={{
+                backgroundColor: 'var(--bg-canvas)',
+                borderColor: 'var(--border-soft)',
+                color: 'var(--text-main)',
+              }}
+            >
+              {d}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => handleOperator('-')}
+            aria-label={tx('ลบ', 'Subtract')}
+            className="h-16 sm:h-[70px] rounded-2xl border-2 text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
+            style={{
+              backgroundColor: pendingOp === '-' ? 'var(--accent-primary)' : 'var(--accent-soft)',
+              borderColor: 'var(--accent-border)',
+              color: pendingOp === '-' ? '#FFFFFF' : 'var(--accent-text)',
+            }}
+          >
+            −
+          </button>
+
+          {/* Row 3: 4, 5, 6, + */}
           {['4', '5', '6'].map((d) => (
             <button
               key={d}
               type="button"
               onClick={() => handleDigit(d)}
-              className="h-16 sm:h-[72px] rounded-2xl border text-2xl sm:text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
+              className="h-16 sm:h-[70px] rounded-2xl border text-2xl sm:text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
               style={{
                 backgroundColor: 'var(--bg-canvas)',
                 borderColor: 'var(--border-soft)',
@@ -334,24 +551,25 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
           ))}
           <button
             type="button"
-            onClick={handlePlus}
-            className="h-16 sm:h-[72px] rounded-2xl border text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
+            onClick={() => handleOperator('+')}
+            aria-label={tx('บวก', 'Add')}
+            className="h-16 sm:h-[70px] rounded-2xl border-2 text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
             style={{
-              backgroundColor: 'var(--accent-soft)',
+              backgroundColor: pendingOp === '+' ? 'var(--accent-primary)' : 'var(--accent-soft)',
               borderColor: 'var(--accent-border)',
-              color: 'var(--accent-text)',
+              color: pendingOp === '+' ? '#FFFFFF' : 'var(--accent-text)',
             }}
-            title={tx('บวกเพิ่มเข้าบิล', 'Add to bill')}
           >
             +
           </button>
 
+          {/* Row 4: 1, 2, 3, = */}
           {['1', '2', '3'].map((d) => (
             <button
               key={d}
               type="button"
               onClick={() => handleDigit(d)}
-              className="h-16 sm:h-[72px] rounded-2xl border text-2xl sm:text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
+              className="h-16 sm:h-[70px] rounded-2xl border text-2xl sm:text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
               style={{
                 backgroundColor: 'var(--bg-canvas)',
                 borderColor: 'var(--border-soft)',
@@ -363,22 +581,23 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
           ))}
           <button
             type="button"
-            onClick={handleResetAll}
-            className="h-16 sm:h-[72px] rounded-2xl border text-base font-bold flex flex-col items-center justify-center gap-0.5 cursor-pointer transition-transform active:scale-95"
+            onClick={handleEquals}
+            aria-label={tx('เท่ากับ', 'Equals')}
+            className="h-16 sm:h-[70px] rounded-2xl border-2 text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
             style={{
-              backgroundColor: 'var(--pastel-peach)',
+              backgroundColor: 'var(--pastel-blue)',
               borderColor: 'var(--border-soft)',
-              color: 'var(--pastel-peach-text)',
+              color: 'var(--pastel-blue-text)',
             }}
           >
-            <RotateCcw className="w-4 h-4" />
-            {tx('ล้างค่า', 'Clear')}
+            =
           </button>
 
+          {/* Row 5: 0 (span 2), ., + ลงบิล */}
           <button
             type="button"
             onClick={() => handleDigit('0')}
-            className="col-span-2 h-16 sm:h-[72px] rounded-2xl border text-2xl sm:text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
+            className="col-span-2 h-16 sm:h-[70px] rounded-2xl border text-2xl sm:text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
             style={{
               backgroundColor: 'var(--bg-canvas)',
               borderColor: 'var(--border-soft)',
@@ -390,7 +609,7 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
           <button
             type="button"
             onClick={() => handleDigit('.')}
-            className="h-16 sm:h-[72px] rounded-2xl border text-2xl sm:text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
+            className="h-16 sm:h-[70px] rounded-2xl border text-2xl sm:text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
             style={{
               backgroundColor: 'var(--bg-canvas)',
               borderColor: 'var(--border-soft)',
@@ -401,16 +620,13 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
           </button>
           <button
             type="button"
-            onClick={handleEquals}
-            className="h-16 sm:h-[72px] rounded-2xl border text-3xl font-num font-bold cursor-pointer transition-transform active:scale-95"
-            style={{
-              backgroundColor: 'var(--accent-soft)',
-              borderColor: 'var(--accent-border)',
-              color: 'var(--accent-text)',
-            }}
-            title={tx('รวมยอดรายการ', 'Add item total')}
+            onClick={handleAddToBill}
+            disabled={roundedEffectiveCalc <= 0}
+            className="h-16 sm:h-[70px] rounded-2xl text-sm sm:text-base font-bold text-white cursor-pointer transition-transform active:scale-95 disabled:opacity-45 px-2 leading-tight"
+            style={{ backgroundColor: 'var(--accent-primary)' }}
+            title={tx('เพิ่มยอดนี้ลงในรายการบิลด้านขวา', 'Add this amount to the bill')}
           >
-            =
+            {tx('+ ลงบิล', '+ To Bill')}
           </button>
         </div>
       </div>
@@ -576,8 +792,8 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
                 >
                   <p className="text-sm">
                     {tx(
-                      'กดตัวเลขแล้วกด + หรือยิงบาร์โค้ดสินค้าได้เลยค่ะ',
-                      'Enter an amount and tap + or scan a barcode!'
+                      'กดคิดเลข (+ − × ÷ =) แล้วกด "+ ลงบิล" หรือรับเงินได้เลยค่ะ',
+                      'Calculate (+ − × ÷ =) and tap "+ To Bill" or pay directly!'
                     )}
                   </p>
                   {!isCharging && (
@@ -647,10 +863,46 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
           )}
         </div>
 
-        {/* Payment Box with 3 Bears Clinging on Top Edge */}
-        <div className="pt-2">
-          <div className="-mb-3.5 relative z-10 px-4">
-            <BearGangMascot pose="peeking" outfits={outfits} />
+        {/* Payment Box with 3 Bears Clinging on Top Edge (Tap Bears to Chat with Helper) */}
+        <div className="pt-1">
+          <div className="-mb-3.5 relative z-10 px-4 flex flex-col items-center">
+            <button
+              type="button"
+              onClick={() => {
+                playSoftClick();
+                onOpenAiBuddy?.();
+              }}
+              className="group flex flex-col items-center cursor-pointer transition-transform hover:-translate-y-0.5 active:scale-[0.98] focus:outline-none"
+              aria-label={tx(
+                'คุยกับผู้ช่วย: วันนี้มีเรื่องอะไร อยากถามไหมคะ',
+                'Open Helper: Anything you would like to ask today?'
+              )}
+              title={tx('แตะที่น้องหมีเพื่อคุยกับผู้ช่วยค่ะ', 'Tap the bears to talk to Smart Helper')}
+            >
+              {/* Speech Bubble Above the 3 Bears' Heads */}
+              <div className="relative mb-1.5">
+                <div
+                  className="px-4 py-1.5 rounded-2xl border-2 shadow-sm text-xs sm:text-sm font-bold tracking-tight transition-colors group-hover:shadow-md"
+                  style={{
+                    backgroundColor: 'var(--bg-card)',
+                    borderColor: 'var(--accent-border)',
+                    color: 'var(--accent-text)',
+                  }}
+                >
+                  {tx('วันนี้มีเรื่องอะไร อยากถามไหมคะ', "Anything you'd like to ask today?")}
+                </div>
+                <span
+                  aria-hidden="true"
+                  className="block w-3 h-3 rotate-45 border-r-2 border-b-2 mx-auto -mt-1.5"
+                  style={{
+                    backgroundColor: 'var(--bg-card)',
+                    borderColor: 'var(--accent-border)',
+                  }}
+                />
+              </div>
+
+              <BearGangMascot pose="peeking" outfits={outfits} />
+            </button>
           </div>
 
           <div

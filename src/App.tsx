@@ -2,22 +2,20 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
-  ArrowLeftRight,
   Barcode,
   Calculator,
-  Check,
-  ChevronLeft,
-  ChevronRight,
+  ChevronDown,
   FileSpreadsheet,
-  GripVertical,
   Home,
   LogOut,
   MessageCircleQuestion,
+  MoreHorizontal,
   PauseCircle,
+  PlayCircle,
   Receipt,
-  RotateCcw,
   ScanLine,
   Settings,
+  SlidersHorizontal,
   UtensilsCrossed,
   Video,
 } from 'lucide-react';
@@ -42,6 +40,13 @@ import { CalculatorPOS } from './components/CalculatorPOS';
 import { CustomerMenuPOS } from './components/CustomerMenuPOS';
 import { BarcodeScannerModal } from './components/BarcodeScannerModal';
 import { ExitSlipScannerModal } from './components/ExitSlipScannerModal';
+import {
+  DEFAULT_CASHIER_ALLOWED_IDS,
+  DEFAULT_HIDDEN_TOOLBAR_IDS,
+  DEFAULT_TOOLBAR_ORDER,
+  ToolbarItemId,
+  ToolbarOrganizerModal,
+} from './components/ToolbarOrganizerModal';
 import {
   CashPaymentModal,
   PaymentSuccessOverlay,
@@ -109,9 +114,12 @@ const KEYS = {
   FAQ_SUBTITLE: 'kkp_faq_modal_subtitle',
   ONLINE_ORDER: 'kkp_online_order_enabled',
   RECEIPT_SLIP: 'kkp_receipt_slip_enabled',
+  EXIT_SCANNER: 'kkp_exit_scanner_enabled',
   AUTO_CHECK: 'kkp_auto_payment_check',
   QUEUE: 'kkp_customer_queue',
   TOOLBAR_ORDER: 'kkp_toolbar_order',
+  HIDDEN_TOOLBAR: 'kkp_hidden_toolbar_ids_v1',
+  CASHIER_ALLOWED_TOOLBAR: 'kkp_cashier_allowed_toolbar_ids_v1',
 };
 
 const CURRENT_CONFIG_VERSION = '2027_kkp_clean_v3';
@@ -161,31 +169,6 @@ function ensureLatestShopConfig(): void {
 }
 
 ensureLatestShopConfig();
-
-type ToolbarItemId =
-  | 'modeSwitch'
-  | 'exitScanner'
-  | 'receiptSlipToggle'
-  | 'watchShop'
-  | 'dressing'
-  | 'guide'
-  | 'testMode'
-  | 'importExcel'
-  | 'summary'
-  | 'settings';
-
-const DEFAULT_TOOLBAR_ORDER: ToolbarItemId[] = [
-  'modeSwitch',
-  'exitScanner',
-  'receiptSlipToggle',
-  'watchShop',
-  'dressing',
-  'guide',
-  'testMode',
-  'importExcel',
-  'summary',
-  'settings',
-];
 
 type ViewScreen = 'welcome' | 'customer' | 'staff-auth' | 'staff-pos';
 
@@ -380,6 +363,10 @@ export default function App() {
     const saved = localStorage.getItem(KEYS.RECEIPT_SLIP);
     return saved === null ? true : saved === 'true';
   });
+  const [exitScannerEnabled, setExitScannerEnabled] = useState<boolean>(() => {
+    const saved = localStorage.getItem(KEYS.EXIT_SCANNER);
+    return saved === null ? true : saved === 'true';
+  });
   const [enableAutoPaymentCheck, setEnableAutoPaymentCheck] = useState<boolean>(() => {
     const saved = localStorage.getItem(KEYS.AUTO_CHECK);
     return saved === null ? SHOP_CONFIG.enableAutoPaymentCheck : saved === 'true';
@@ -417,9 +404,12 @@ export default function App() {
   const [callPeers, setCallPeers] = useState<CallPeerSummary[]>([]);
   const [faqModalOpen, setFaqModalOpen] = useState(false);
   const [memberRewardsOpen, setMemberRewardsOpen] = useState(false);
+  const [toolbarOrganizerOpen, setToolbarOrganizerOpen] = useState(false);
+  const [buddyOpen, setBuddyOpen] = useState(false);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [scanToast, setScanToast] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  // Customizable Top Toolbar Order State
+  // Customizable Top Toolbar Order, Hidden Buttons & Staff Allowance State
   const [toolbarOrder, setToolbarOrder] = useState<ToolbarItemId[]>(() => {
     try {
       const raw = localStorage.getItem(KEYS.TOOLBAR_ORDER);
@@ -432,7 +422,30 @@ export default function App() {
       return DEFAULT_TOOLBAR_ORDER;
     }
   });
-  const [isReorderMode, setIsReorderMode] = useState(false);
+  const [hiddenToolbarIds, setHiddenToolbarIds] = useState<ToolbarItemId[]>(() => {
+    try {
+      const raw = localStorage.getItem(KEYS.HIDDEN_TOOLBAR);
+      if (!raw) return DEFAULT_HIDDEN_TOOLBAR_IDS;
+      const parsed = JSON.parse(raw) as ToolbarItemId[];
+      return Array.isArray(parsed)
+        ? parsed.filter((id) => DEFAULT_TOOLBAR_ORDER.includes(id))
+        : DEFAULT_HIDDEN_TOOLBAR_IDS;
+    } catch {
+      return DEFAULT_HIDDEN_TOOLBAR_IDS;
+    }
+  });
+  const [cashierAllowedToolbarIds, setCashierAllowedToolbarIds] = useState<ToolbarItemId[]>(() => {
+    try {
+      const raw = localStorage.getItem(KEYS.CASHIER_ALLOWED_TOOLBAR);
+      if (!raw) return DEFAULT_CASHIER_ALLOWED_IDS;
+      const parsed = JSON.parse(raw) as ToolbarItemId[];
+      return Array.isArray(parsed)
+        ? parsed.filter((id) => DEFAULT_TOOLBAR_ORDER.includes(id))
+        : DEFAULT_CASHIER_ALLOWED_IDS;
+    } catch {
+      return DEFAULT_CASHIER_ALLOWED_IDS;
+    }
+  });
   const [draggedToolbarId, setDraggedToolbarId] = useState<ToolbarItemId | null>(null);
   const [dragOverToolbarId, setDragOverToolbarId] = useState<ToolbarItemId | null>(null);
 
@@ -633,10 +646,39 @@ export default function App() {
       setReceiptSlipEnabled(val);
       localStorage.setItem(KEYS.RECEIPT_SLIP, String(val));
     }
+    if (s.exitScannerEnabled !== undefined) {
+      const val = s.exitScannerEnabled.toLowerCase() !== 'false';
+      setExitScannerEnabled(val);
+      localStorage.setItem(KEYS.EXIT_SCANNER, String(val));
+    }
     if (s.enableAutoPaymentCheck !== undefined) {
       const val = s.enableAutoPaymentCheck.toLowerCase() === 'true';
       setEnableAutoPaymentCheck(val);
       localStorage.setItem(KEYS.AUTO_CHECK, String(val));
+    }
+    if (s.hiddenToolbarIdsJson) {
+      try {
+        const parsed = JSON.parse(s.hiddenToolbarIdsJson) as ToolbarItemId[];
+        if (Array.isArray(parsed)) {
+          const clean = parsed.filter((id) => DEFAULT_TOOLBAR_ORDER.includes(id));
+          setHiddenToolbarIds(clean);
+          localStorage.setItem(KEYS.HIDDEN_TOOLBAR, JSON.stringify(clean));
+        }
+      } catch {
+        // Ignore malformed hiddenToolbarIdsJson
+      }
+    }
+    if (s.cashierAllowedToolbarIdsJson) {
+      try {
+        const parsed = JSON.parse(s.cashierAllowedToolbarIdsJson) as ToolbarItemId[];
+        if (Array.isArray(parsed)) {
+          const clean = parsed.filter((id) => DEFAULT_TOOLBAR_ORDER.includes(id));
+          setCashierAllowedToolbarIds(clean);
+          localStorage.setItem(KEYS.CASHIER_ALLOWED_TOOLBAR, JSON.stringify(clean));
+        }
+      } catch {
+        // Ignore malformed cashierAllowedToolbarIdsJson
+      }
     }
   }, []);
 
@@ -662,7 +704,10 @@ export default function App() {
       faqModalSubtitle,
       onlineOrderEnabled: String(onlineOrderEnabled),
       receiptSlipEnabled: String(receiptSlipEnabled),
+      exitScannerEnabled: String(exitScannerEnabled),
       enableAutoPaymentCheck: String(enableAutoPaymentCheck),
+      hiddenToolbarIdsJson: JSON.stringify(hiddenToolbarIds),
+      cashierAllowedToolbarIdsJson: JSON.stringify(cashierAllowedToolbarIds),
       ...(overrides || {}),
     }),
     [
@@ -684,7 +729,10 @@ export default function App() {
       faqModalSubtitle,
       onlineOrderEnabled,
       receiptSlipEnabled,
+      exitScannerEnabled,
       enableAutoPaymentCheck,
+      hiddenToolbarIds,
+      cashierAllowedToolbarIds,
     ]
   );
 
@@ -1039,7 +1087,7 @@ export default function App() {
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName?.toLowerCase();
       if (tag === 'input' || tag === 'textarea') return;
-      if (checkoutState.step !== 'idle' || settingsOpen || guideOpen || dressingOpen || watchOpen || faqModalOpen || exitScannerOpen) return;
+      if (checkoutState.step !== 'idle' || settingsOpen || guideOpen || dressingOpen || watchOpen || faqModalOpen || exitScannerOpen || toolbarOrganizerOpen || buddyOpen) return;
 
       const now = Date.now();
       if (now - lastKeyTime > 120) {
@@ -1062,7 +1110,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [viewScreen, currentUser, checkoutState.step, settingsOpen, guideOpen, dressingOpen, watchOpen, faqModalOpen, exitScannerOpen, handleBarcodeLookup]);
+  }, [viewScreen, currentUser, checkoutState.step, settingsOpen, guideOpen, dressingOpen, watchOpen, faqModalOpen, exitScannerOpen, toolbarOrganizerOpen, buddyOpen, handleBarcodeLookup]);
 
   // Silent Void Logging for removing item / clearing bill
   const handleRemoveBillItem = (index: number) => {
@@ -1319,6 +1367,15 @@ export default function App() {
       setReceiptSlipEnabled(nextVal);
       localStorage.setItem(KEYS.RECEIPT_SLIP, String(nextVal));
       pushConfigSnapshotRef.current({ receiptSlipEnabled: String(nextVal) }, true);
+    },
+    []
+  );
+
+  const handleToggleExitScanner = useCallback(
+    (nextVal: boolean) => {
+      setExitScannerEnabled(nextVal);
+      localStorage.setItem(KEYS.EXIT_SCANNER, String(nextVal));
+      pushConfigSnapshotRef.current({ exitScannerEnabled: String(nextVal) }, true);
     },
     []
   );
@@ -1607,6 +1664,7 @@ export default function App() {
           mascotMode="krua"
           outfits={bearOutfits}
           receiptSlipEnabled={receiptSlipEnabled}
+          exitScannerEnabled={exitScannerEnabled}
           receiptData={
             checkoutState.receipt
               ? receipts.find((r) => r.billId === checkoutState.receipt?.billId) ||
@@ -1713,7 +1771,7 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   playSoftClick();
-                  setIsReorderMode(false);
+                  setMoreMenuOpen(false);
                   setCurrentUser(null);
                   setViewScreen('welcome');
                 }}
@@ -1732,7 +1790,7 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   playSoftClick();
-                  setIsReorderMode(false);
+                  setMoreMenuOpen(false);
                   setCurrentUser(null);
                   setViewScreen('staff-auth');
                 }}
@@ -1749,32 +1807,21 @@ export default function App() {
             </div>
           </div>
 
-          {/* Bottom Toolbar Row: Reorderable Action Buttons (Drag & Drop + Arrow Controls) */}
+          {/* Bottom Toolbar Row: Clean Organized Buttons + More Menu + Organize Controls */}
           {(() => {
-            const visibleIds = toolbarOrder.filter((id) => {
-              if (!isAdmin && ['testMode', 'importExcel', 'summary', 'settings'].includes(id)) {
+            const adminLockedIds: ToolbarItemId[] = ['testMode', 'importExcel', 'settings'];
+            const permittedIds = toolbarOrder.filter((id) => {
+              if (!isAdmin && (adminLockedIds.includes(id) || !cashierAllowedToolbarIds.includes(id))) {
                 return false;
               }
               return true;
             });
+            const visibleIds = permittedIds.filter((id) => !hiddenToolbarIds.includes(id));
+            const hiddenMenuIds = permittedIds.filter((id) => hiddenToolbarIds.includes(id));
 
             const persistOrder = (next: ToolbarItemId[]) => {
               setToolbarOrder(next);
               localStorage.setItem(KEYS.TOOLBAR_ORDER, JSON.stringify(next));
-            };
-
-            const moveVisibleItem = (id: ToolbarItemId, direction: -1 | 1) => {
-              playSoftClick();
-              const visIdx = visibleIds.indexOf(id);
-              const targetVisIdx = visIdx + direction;
-              if (visIdx < 0 || targetVisIdx < 0 || targetVisIdx >= visibleIds.length) return;
-              const targetId = visibleIds[targetVisIdx];
-              const next = [...toolbarOrder];
-              const a = next.indexOf(id);
-              const b = next.indexOf(targetId);
-              if (a < 0 || b < 0) return;
-              [next[a], next[b]] = [next[b], next[a]];
-              persistOrder(next);
             };
 
             const handleDropOnItem = (targetId: ToolbarItemId) => {
@@ -1796,20 +1843,27 @@ export default function App() {
               setDragOverToolbarId(null);
             };
 
-            const renderToolbarItem = (id: ToolbarItemId) => {
+            const renderToolbarItem = (id: ToolbarItemId, insideMenu = false) => {
+              const afterClick = () => {
+                if (insideMenu) setMoreMenuOpen(false);
+              };
+              const btnClass = insideMenu
+                ? 'w-full px-3.5 py-2.5 rounded-xl border text-xs sm:text-sm font-bold flex items-center gap-2 cursor-pointer whitespace-nowrap text-left'
+                : 'px-3.5 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0';
+
               switch (id) {
                 case 'modeSwitch':
                   return (
                     <div
-                      className="flex items-center gap-1 p-1 rounded-2xl border"
+                      className={`flex items-center gap-1 p-1 rounded-2xl border ${insideMenu ? 'w-full justify-between' : ''}`}
                       style={{ backgroundColor: 'var(--bg-subtle)', borderColor: 'var(--border-soft)' }}
                     >
                       <button
                         type="button"
                         onClick={() => {
-                          if (isReorderMode) return;
                           playSoftClick();
                           setPosMode('calculator');
+                          afterClick();
                         }}
                         className="px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
                         style={{
@@ -1823,9 +1877,9 @@ export default function App() {
                       <button
                         type="button"
                         onClick={() => {
-                          if (isReorderMode) return;
                           playSoftClick();
                           setPosMode('menu');
+                          afterClick();
                         }}
                         className="px-3.5 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
                         style={{
@@ -1841,28 +1895,76 @@ export default function App() {
                 case 'exitScanner': {
                   const waitingExitCount = receipts.filter((r) => !r.exitedAt).length;
                   return (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (isReorderMode) return;
-                        playSoftClick();
-                        setExitScannerOpen(true);
-                      }}
-                      className="px-3.5 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                    <div
+                      className={`inline-flex items-stretch rounded-2xl border overflow-hidden shrink-0 ${
+                        insideMenu ? 'w-full' : ''
+                      }`}
                       style={{
-                        backgroundColor: 'var(--accent-soft)',
-                        borderColor: 'var(--accent-border)',
-                        color: 'var(--accent-text)',
+                        borderColor: exitScannerEnabled ? 'var(--accent-border)' : '#FECDD3',
                       }}
                     >
-                      <ScanLine className="w-4 h-4" />
-                      {tx('สแกนสลิปผ่านประตู', 'Exit Slip Scan')}
-                      {waitingExitCount > 0 && (
-                        <span className="px-1.5 py-0.5 rounded-lg bg-emerald-600 text-white text-[10px] font-num">
-                          {waitingExitCount}
-                        </span>
-                      )}
-                    </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          playSoftClick();
+                          setExitScannerOpen(true);
+                          afterClick();
+                        }}
+                        className={`px-3 py-2.5 text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+                          insideMenu ? 'flex-1 text-left' : ''
+                        }`}
+                        style={{
+                          backgroundColor: exitScannerEnabled ? 'var(--accent-soft)' : '#FFF1F2',
+                          color: exitScannerEnabled ? 'var(--accent-text)' : '#9F1239',
+                        }}
+                      >
+                        <ScanLine className="w-4 h-4 shrink-0" />
+                        {tx('สแกนสลิปผ่านประตู', 'Exit Slip Scan')}
+                        {exitScannerEnabled && waitingExitCount > 0 && (
+                          <span className="px-1.5 py-0.5 rounded-lg bg-emerald-600 text-white text-[10px] font-num">
+                            {waitingExitCount}
+                          </span>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          playSoftClick();
+                          const next = !exitScannerEnabled;
+                          handleToggleExitScanner(next);
+                          showToast(
+                            'ok',
+                            next
+                              ? tx('เปิดใช้สแกนสลิปผ่านประตูแล้วค่ะ', 'Exit slip scanner enabled')
+                              : tx('หยุดใช้สแกนสลิปผ่านประตูชั่วคราวแล้วค่ะ', 'Exit slip scanner paused')
+                          );
+                          afterClick();
+                        }}
+                        title={
+                          exitScannerEnabled
+                            ? tx('กำลังเปิดใช้ — กดเพื่อหยุดใช้', 'Active — tap to pause')
+                            : tx('หยุดใช้อยู่ — กดเพื่อเปิดใช้', 'Paused — tap to enable')
+                        }
+                        className="px-2.5 py-2.5 border-l text-[11px] sm:text-xs font-extrabold flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+                        style={{
+                          backgroundColor: exitScannerEnabled ? '#DCFCE7' : '#FFE4E6',
+                          borderColor: exitScannerEnabled ? '#A7F3D0' : '#FECDD3',
+                          color: exitScannerEnabled ? '#166534' : '#9F1239',
+                        }}
+                      >
+                        {exitScannerEnabled ? (
+                          <>
+                            <PlayCircle className="w-3.5 h-3.5 shrink-0" />
+                            {tx('เปิดใช้', 'ON')}
+                          </>
+                        ) : (
+                          <>
+                            <PauseCircle className="w-3.5 h-3.5 shrink-0" />
+                            {tx('หยุดใช้', 'PAUSED')}
+                          </>
+                        )}
+                      </button>
+                    </div>
                   );
                 }
                 case 'receiptSlipToggle':
@@ -1870,7 +1972,6 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        if (isReorderMode) return;
                         playSoftClick();
                         const next = !receiptSlipEnabled;
                         handleToggleReceiptSlip(next);
@@ -1880,8 +1981,9 @@ export default function App() {
                             ? tx('เปิดการออกใบสลิป & QR ผ่านประตูแล้วค่ะ', 'Receipt slips & exit QR resumed')
                             : tx('หยุดการให้ใบสลิปชั่วคราวแล้วค่ะ', 'Receipt slip issuance paused')
                         );
+                        afterClick();
                       }}
-                      className="px-3.5 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                      className={btnClass}
                       style={{
                         backgroundColor: receiptSlipEnabled ? '#ECFDF5' : '#FFF1F2',
                         borderColor: receiptSlipEnabled ? '#A7F3D0' : '#FECDD3',
@@ -1889,9 +1991,9 @@ export default function App() {
                       }}
                     >
                       {receiptSlipEnabled ? (
-                        <Receipt className="w-4 h-4" />
+                        <Receipt className="w-4 h-4 shrink-0" />
                       ) : (
-                        <PauseCircle className="w-4 h-4" />
+                        <PauseCircle className="w-4 h-4 shrink-0" />
                       )}
                       {receiptSlipEnabled
                         ? tx('ใบสลิป: เปิดแจก', 'Slips: ON')
@@ -1904,18 +2006,18 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        if (isReorderMode) return;
                         playSoftClick();
                         setWatchOpen(true);
+                        afterClick();
                       }}
-                      className="px-3.5 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                      className={btnClass}
                       style={{
                         backgroundColor: momWaiting ? '#FFEDD5' : 'var(--accent-soft)',
                         borderColor: momWaiting ? '#EA580C' : 'var(--accent-border)',
                         color: momWaiting ? '#9A3412' : 'var(--accent-text)',
                       }}
                     >
-                      <Video className="w-4 h-4" />
+                      <Video className="w-4 h-4 shrink-0" />
                       {momWaiting
                         ? tx('เฝ้าร้านแทนแม่ (แม่รอสาย)', 'Watch Shop (Mom Waiting)')
                         : tx('เฝ้าร้านแทนแม่', 'Video Call Shop')}
@@ -1927,11 +2029,11 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        if (isReorderMode) return;
                         playSoftClick();
                         setDressingOpen(true);
+                        afterClick();
                       }}
-                      className="px-3.5 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold cursor-pointer whitespace-nowrap shrink-0"
+                      className={btnClass}
                       style={{
                         backgroundColor: 'var(--pastel-pink)',
                         borderColor: 'var(--border-soft)',
@@ -1946,11 +2048,11 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        if (isReorderMode) return;
                         playSoftClick();
                         setGuideOpen(true);
+                        afterClick();
                       }}
-                      className="px-3.5 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold cursor-pointer whitespace-nowrap shrink-0"
+                      className={btnClass}
                       style={{
                         backgroundColor: 'var(--pastel-peach)',
                         borderColor: 'var(--border-soft)',
@@ -1965,13 +2067,13 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        if (isReorderMode) return;
                         playSoftClick();
                         const next = !isTestMode;
                         setIsTestMode(next);
                         saveDailyTestMode(next);
+                        afterClick();
                       }}
-                      className="px-3 py-2.5 rounded-2xl border text-xs font-bold cursor-pointer whitespace-nowrap shrink-0"
+                      className={btnClass}
                       style={{
                         backgroundColor: isTestMode ? '#FFEDD5' : 'var(--accent-soft)',
                         borderColor: isTestMode ? '#EA580C' : 'var(--accent-border)',
@@ -1986,19 +2088,19 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        if (isReorderMode) return;
                         playSoftClick();
                         setSettingsInitialTab('products');
                         setSettingsOpen(true);
+                        afterClick();
                       }}
-                      className="px-3.5 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                      className={btnClass}
                       style={{
                         backgroundColor: 'var(--accent-soft)',
                         borderColor: 'var(--accent-border)',
                         color: 'var(--accent-text)',
                       }}
                     >
-                      <Barcode className="w-4 h-4" />
+                      <Barcode className="w-4 h-4 shrink-0" />
                       {tx('นำเข้าสินค้า Excel', 'Import Excel')}
                     </button>
                   );
@@ -2007,19 +2109,19 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        if (isReorderMode) return;
                         playSoftClick();
                         setSettingsInitialTab('summary');
                         setSettingsOpen(true);
+                        afterClick();
                       }}
-                      className="px-3.5 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                      className={btnClass}
                       style={{
                         backgroundColor: 'var(--pastel-blue)',
                         borderColor: 'var(--border-soft)',
                         color: 'var(--pastel-blue-text)',
                       }}
                     >
-                      <FileSpreadsheet className="w-4 h-4" />
+                      <FileSpreadsheet className="w-4 h-4 shrink-0" />
                       {tx('สรุปยอด / LINE / Excel', 'Summary / LINE / Excel')}
                     </button>
                   );
@@ -2028,19 +2130,19 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => {
-                        if (isReorderMode) return;
                         playSoftClick();
                         setSettingsInitialTab('general');
                         setSettingsOpen(true);
+                        afterClick();
                       }}
-                      className="px-3.5 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+                      className={btnClass}
                       style={{
                         backgroundColor: 'var(--bg-card)',
                         borderColor: 'var(--border-soft)',
                         color: 'var(--text-main)',
                       }}
                     >
-                      <Settings className="w-4 h-4" />
+                      <Settings className="w-4 h-4 shrink-0" />
                       {tx('ตั้งค่า', 'Settings')}
                     </button>
                   );
@@ -2048,129 +2150,106 @@ export default function App() {
             };
 
             return (
-              <div className="space-y-1.5">
-                {isReorderMode && (
-                  <div
-                    className="rounded-xl px-3 py-1.5 text-xs font-semibold flex flex-wrap items-center justify-between gap-2"
-                    style={{ backgroundColor: 'var(--pastel-peach)', color: 'var(--pastel-peach-text)' }}
-                  >
-                    <span>
-                      {tx(
-                        '✨ โหมดย้ายตำแหน่งปุ่ม: กดลูกศร ◀ ▶ หรือลากปุ่มวางสลับตำแหน่งตามความถนัดได้เลยค่ะ',
-                        '✨ Reorder Mode: Use ◀ ▶ arrows or drag & drop buttons to customize your toolbar.'
-                      )}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        playSoftClick();
-                        persistOrder(DEFAULT_TOOLBAR_ORDER);
+              <div className="relative flex flex-wrap items-center gap-2">
+                {visibleIds.map((id) => {
+                  const isDragged = draggedToolbarId === id;
+                  const isOver = dragOverToolbarId === id && draggedToolbarId !== id;
+                  return (
+                    <div
+                      key={id}
+                      draggable
+                      onDragStart={(e) => {
+                        setDraggedToolbarId(id);
+                        e.dataTransfer.effectAllowed = 'move';
                       }}
-                      className="px-2.5 py-1 rounded-lg bg-white/80 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                      onDragOver={(e) => {
+                        e.preventDefault();
+                        if (dragOverToolbarId !== id) setDragOverToolbarId(id);
+                      }}
+                      onDragLeave={() => {
+                        if (dragOverToolbarId === id) setDragOverToolbarId(null);
+                      }}
+                      onDrop={(e) => {
+                        e.preventDefault();
+                        handleDropOnItem(id);
+                      }}
+                      onDragEnd={() => {
+                        setDraggedToolbarId(null);
+                        setDragOverToolbarId(null);
+                      }}
+                      className={`flex items-center rounded-2xl transition-all ${
+                        isDragged ? 'opacity-45 scale-95' : ''
+                      } ${isOver ? 'ring-2 ring-emerald-500 ring-offset-1' : ''}`}
                     >
-                      <RotateCcw className="w-3 h-3" />
-                      {tx('รีเซ็ตลำดับ', 'Reset Order')}
-                    </button>
-                  </div>
-                )}
+                      {renderToolbarItem(id, false)}
+                    </div>
+                  );
+                })}
 
-                <div className="flex flex-wrap items-center gap-2">
-                  {visibleIds.map((id, idx) => {
-                    const isDragged = draggedToolbarId === id;
-                    const isOver = dragOverToolbarId === id && draggedToolbarId !== id;
-                    return (
-                      <div
-                        key={id}
-                        draggable
-                        onDragStart={(e) => {
-                          setDraggedToolbarId(id);
-                          e.dataTransfer.effectAllowed = 'move';
+                {/* Right Controls: Compact "More" Dropdown for Hidden Buttons + "Manage/Hide Buttons" */}
+                <div className="flex items-center gap-1.5 ml-auto shrink-0 relative">
+                  {hiddenMenuIds.length > 0 && (
+                    <div className="relative">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          playSoftClick();
+                          setMoreMenuOpen((prev) => !prev);
                         }}
-                        onDragOver={(e) => {
-                          e.preventDefault();
-                          if (dragOverToolbarId !== id) setDragOverToolbarId(id);
+                        className="px-3 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                        style={{
+                          backgroundColor: moreMenuOpen ? 'var(--accent-soft)' : 'var(--bg-subtle)',
+                          borderColor: moreMenuOpen ? 'var(--accent-border)' : 'var(--border-soft)',
+                          color: moreMenuOpen ? 'var(--accent-text)' : 'var(--text-main)',
                         }}
-                        onDragLeave={() => {
-                          if (dragOverToolbarId === id) setDragOverToolbarId(null);
-                        }}
-                        onDrop={(e) => {
-                          e.preventDefault();
-                          handleDropOnItem(id);
-                        }}
-                        onDragEnd={() => {
-                          setDraggedToolbarId(null);
-                          setDragOverToolbarId(null);
-                        }}
-                        title={tx('ลากเพื่อสลับตำแหน่งปุ่มได้', 'Drag to reorder button')}
-                        className={`flex items-center gap-1 rounded-2xl transition-all ${
-                          isDragged ? 'opacity-45 scale-95' : ''
-                        } ${isOver ? 'ring-2 ring-emerald-500 ring-offset-1' : ''} ${
-                          isReorderMode ? 'p-1 border border-dashed bg-white/60' : ''
-                        }`}
-                        style={isReorderMode ? { borderColor: 'var(--accent-primary)' } : undefined}
                       >
-                        {isReorderMode && (
-                          <button
-                            type="button"
-                            disabled={idx === 0}
-                            onClick={() => moveVisibleItem(id, -1)}
-                            aria-label={tx('เลื่อนไปทางซ้าย', 'Move left')}
-                            className="w-7 h-8 rounded-xl border flex items-center justify-center cursor-pointer disabled:opacity-30"
-                            style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                        <MoreHorizontal className="w-4 h-4" />
+                        {tx(`เมนูอื่น (${hiddenMenuIds.length})`, `More (${hiddenMenuIds.length})`)}
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      </button>
+
+                      {moreMenuOpen && (
+                        <>
+                          <div
+                            className="fixed inset-0 z-40"
+                            onClick={() => setMoreMenuOpen(false)}
+                          />
+                          <div
+                            className="absolute right-0 mt-2 w-72 rounded-2xl border shadow-2xl p-2.5 space-y-2 z-50"
+                            style={{
+                              backgroundColor: 'var(--bg-card)',
+                              borderColor: 'var(--border-soft)',
+                            }}
                           >
-                            <ChevronLeft className="w-4 h-4" />
-                          </button>
-                        )}
+                            <p className="text-[11px] font-bold px-1.5" style={{ color: 'var(--text-muted)' }}>
+                              {tx('ปุ่มที่ซ่อนจากหน้าคิดเงิน (กดใช้ได้ทันที)', 'Hidden from POS bar (ready to use)')}
+                            </p>
+                            {hiddenMenuIds.map((id) => (
+                              <div key={id}>{renderToolbarItem(id, true)}</div>
+                            ))}
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
 
-                        {isReorderMode && (
-                          <span className="cursor-grab text-stone-400 px-0.5" aria-hidden="true">
-                            <GripVertical className="w-3.5 h-3.5" />
-                          </span>
-                        )}
-
-                        {renderToolbarItem(id)}
-
-                        {isReorderMode && (
-                          <button
-                            type="button"
-                            disabled={idx === visibleIds.length - 1}
-                            onClick={() => moveVisibleItem(id, 1)}
-                            aria-label={tx('เลื่อนไปทางขวา', 'Move right')}
-                            className="w-7 h-8 rounded-xl border flex items-center justify-center cursor-pointer disabled:opacity-30"
-                            style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
-                          >
-                            <ChevronRight className="w-4 h-4" />
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-
-                  {/* Reorder Toggle Button */}
                   <button
                     type="button"
                     onClick={() => {
                       playSoftClick();
-                      setIsReorderMode((prev) => !prev);
+                      setMoreMenuOpen(false);
+                      setToolbarOrganizerOpen(true);
                     }}
-                    className="px-3 py-2.5 rounded-2xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 ml-auto"
+                    className="px-3 py-2.5 rounded-2xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                     style={{
-                      backgroundColor: isReorderMode ? 'var(--accent-primary)' : 'var(--bg-canvas)',
-                      borderColor: isReorderMode ? 'var(--accent-primary)' : 'var(--border-soft)',
-                      color: isReorderMode ? '#FFFFFF' : 'var(--text-muted)',
+                      backgroundColor: 'var(--bg-canvas)',
+                      borderColor: 'var(--border-soft)',
+                      color: 'var(--text-muted)',
                     }}
+                    title={tx('เลือกซ่อนหรือแสดงปุ่มบนหน้าคิดเงิน', 'Choose which buttons appear on POS screen')}
                   >
-                    {isReorderMode ? (
-                      <>
-                        <Check className="w-3.5 h-3.5" />
-                        {tx('จัดเรียงเสร็จแล้ว', 'Done Reordering')}
-                      </>
-                    ) : (
-                      <>
-                        <ArrowLeftRight className="w-3.5 h-3.5" />
-                        {tx('ย้ายตำแหน่งปุ่ม', 'Reorder Buttons')}
-                      </>
-                    )}
+                    <SlidersHorizontal className="w-3.5 h-3.5" />
+                    {tx('จัดการ / ซ่อนปุ่ม', 'Hide / Organize')}
                   </button>
                 </div>
               </div>
@@ -2264,6 +2343,7 @@ export default function App() {
                 method: 'สแกน QR',
               });
             }}
+            onOpenAiBuddy={() => setBuddyOpen(true)}
           />
         ) : (
           <CustomerMenuPOS
@@ -2327,8 +2407,12 @@ export default function App() {
         )}
       </main>
 
-      {/* Floating Bottom-Left AI Buddy */}
-      <AiBuddyDrawer staffName={activeUser.name} />
+      {/* AI Buddy Drawer (opened by tapping the 3 Bears above Amount Due) */}
+      <AiBuddyDrawer
+        staffName={activeUser.name}
+        isOpen={buddyOpen}
+        onClose={() => setBuddyOpen(false)}
+      />
 
       {/* Camera Barcode Scanner */}
       <BarcodeScannerModal
@@ -2340,12 +2424,73 @@ export default function App() {
         menuItems={menuItems}
       />
 
+      {/* Toolbar Hide / Show & Permission Organizer Modal */}
+      <ToolbarOrganizerModal
+        isOpen={toolbarOrganizerOpen}
+        onClose={() => setToolbarOrganizerOpen(false)}
+        isAdmin={isAdmin}
+        toolbarOrder={toolbarOrder}
+        hiddenToolbarIds={hiddenToolbarIds}
+        cashierAllowedIds={cashierAllowedToolbarIds}
+        foodShopNameTh={foodShopNameTh}
+        foodShopNameEn={foodShopNameEn}
+        onChangeToolbarOrder={(next) => {
+          setToolbarOrder(next);
+          localStorage.setItem(KEYS.TOOLBAR_ORDER, JSON.stringify(next));
+        }}
+        onChangeHiddenToolbarIds={(next) => {
+          setHiddenToolbarIds(next);
+          localStorage.setItem(KEYS.HIDDEN_TOOLBAR, JSON.stringify(next));
+          if (isAdmin) {
+            pushConfigSnapshotRef.current({ hiddenToolbarIdsJson: JSON.stringify(next) }, true);
+          }
+        }}
+        onChangeCashierAllowedIds={(next) => {
+          setCashierAllowedToolbarIds(next);
+          localStorage.setItem(KEYS.CASHIER_ALLOWED_TOOLBAR, JSON.stringify(next));
+          pushConfigSnapshotRef.current(
+            { cashierAllowedToolbarIdsJson: JSON.stringify(next) },
+            true
+          );
+        }}
+        onResetDefault={() => {
+          setToolbarOrder(DEFAULT_TOOLBAR_ORDER);
+          setHiddenToolbarIds(DEFAULT_HIDDEN_TOOLBAR_IDS);
+          setCashierAllowedToolbarIds(DEFAULT_CASHIER_ALLOWED_IDS);
+          localStorage.setItem(KEYS.TOOLBAR_ORDER, JSON.stringify(DEFAULT_TOOLBAR_ORDER));
+          localStorage.setItem(KEYS.HIDDEN_TOOLBAR, JSON.stringify(DEFAULT_HIDDEN_TOOLBAR_IDS));
+          localStorage.setItem(
+            KEYS.CASHIER_ALLOWED_TOOLBAR,
+            JSON.stringify(DEFAULT_CASHIER_ALLOWED_IDS)
+          );
+          if (isAdmin) {
+            pushConfigSnapshotRef.current(
+              {
+                hiddenToolbarIdsJson: JSON.stringify(DEFAULT_HIDDEN_TOOLBAR_IDS),
+                cashierAllowedToolbarIdsJson: JSON.stringify(DEFAULT_CASHIER_ALLOWED_IDS),
+              },
+              true
+            );
+          }
+        }}
+      />
+
       {/* Exit Gate Slip Scanner Modal (สำหรับคุณแม่และพนักงานตรวจสลิปออกประตู) */}
       <ExitSlipScannerModal
         isOpen={exitScannerOpen}
         onClose={() => setExitScannerOpen(false)}
         receipts={receipts}
         staffName={activeUser.name}
+        exitScannerEnabled={exitScannerEnabled}
+        onToggleExitScanner={(next) => {
+          handleToggleExitScanner(next);
+          showToast(
+            'ok',
+            next
+              ? tx('เปิดใช้สแกนสลิปผ่านประตูแล้วค่ะ', 'Exit slip scanner enabled')
+              : tx('หยุดใช้สแกนสลิปผ่านประตูชั่วคราวแล้วค่ะ', 'Exit slip scanner paused')
+          );
+        }}
         onMarkReceiptExited={handleMarkReceiptExited}
       />
 
@@ -2388,6 +2533,7 @@ export default function App() {
         mascotMode={checkoutState.source === 'menu' ? 'krua' : 'kids'}
         outfits={bearOutfits}
         receiptSlipEnabled={receiptSlipEnabled}
+        exitScannerEnabled={exitScannerEnabled}
         receiptData={
           checkoutState.receipt
             ? receipts.find((r) => r.billId === checkoutState.receipt?.billId) ||
@@ -2555,6 +2701,8 @@ export default function App() {
           }}
           receiptSlipEnabled={receiptSlipEnabled}
           onToggleReceiptSlip={handleToggleReceiptSlip}
+          exitScannerEnabled={exitScannerEnabled}
+          onToggleExitScanner={handleToggleExitScanner}
           isTestMode={isTestMode}
           onToggleTestMode={(val) => {
             setIsTestMode(val);
