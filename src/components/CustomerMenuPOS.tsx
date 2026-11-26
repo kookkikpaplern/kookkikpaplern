@@ -117,7 +117,7 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
   const [isRefreshingOrders, setIsRefreshingOrders] = useState(false);
 
   const orderableItems = useMemo(
-    () => menuItems.filter((item) => item.price > 0),
+    () => menuItems.filter((item) => item.price > 0 && item.source !== 'customer'),
     [menuItems]
   );
 

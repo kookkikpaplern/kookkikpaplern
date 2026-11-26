@@ -209,6 +209,7 @@ export async function parseProductsFromExcelFile(file: File): Promise<ParsedExce
       category,
       imageUrl: imageUrl || undefined,
       status,
+      source: 'shop',
     });
   }
 

@@ -1245,6 +1245,8 @@ export default function App() {
         barcode: cleanCode,
         status: 'พร้อมขาย',
         stockMode: 'unlimited',
+        source: incoming.source || 'customer',
+        submittedAt: incoming.submittedAt || new Date().toISOString(),
       };
 
       const nextItems = [donatedItem, ...menuItems];

@@ -52,6 +52,7 @@ import {
   getOfflineQueue,
   getSaleHistoryLogs,
   getSilentVoidLogs,
+  isCustomerItemMissingFromShop,
   postToSheets,
 } from '../utils/sheetsSync';
 import {
@@ -237,18 +238,34 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
     type: 'ok' | 'err';
     text: string;
   } | null>(null);
+  const [productSourceFilter, setProductSourceFilter] = useState<
+    'all' | 'shop' | 'customer' | 'missing'
+  >('all');
   const excelPreviewRef = useRef<HTMLDivElement>(null);
+
+  const productSourceCounts = useMemo(() => {
+    const shop = menuItems.filter((m) => m.source !== 'customer').length;
+    const customer = menuItems.filter((m) => m.source === 'customer').length;
+    const missing = menuItems.filter((m) => isCustomerItemMissingFromShop(m, menuItems)).length;
+    return { total: menuItems.length, shop, customer, missing };
+  }, [menuItems]);
 
   const filteredProducts = useMemo(() => {
     const q = productSearch.trim().toLowerCase();
-    if (!q) return menuItems;
-    return menuItems.filter(
-      (m) =>
+    return menuItems.filter((m) => {
+      if (productSourceFilter === 'shop' && m.source === 'customer') return false;
+      if (productSourceFilter === 'customer' && m.source !== 'customer') return false;
+      if (productSourceFilter === 'missing' && !isCustomerItemMissingFromShop(m, menuItems)) {
+        return false;
+      }
+      if (!q) return true;
+      return (
         m.name.toLowerCase().includes(q) ||
         m.barcode.toLowerCase().includes(q) ||
         m.category.toLowerCase().includes(q)
-    );
-  }, [menuItems, productSearch]);
+      );
+    });
+  }, [menuItems, productSearch, productSourceFilter]);
 
   // Customer Self-Order QR Poster Generator state
   const [customerQrBaseUrl, setCustomerQrBaseUrl] = useState<string>(() => {
@@ -558,6 +575,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
       category: newProdCategory.trim() || 'สินค้าทั่วไป',
       imageUrl: newProdImageUrl || undefined,
       status: 'พร้อมขาย',
+      source: 'shop',
     };
 
     const existingIdx = menuItems.findIndex((item) => {
@@ -663,6 +681,21 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
     onChangeMenuItems(menuItems.filter((m) => m.id !== id));
   };
 
+  const handlePromoteCustomerProduct = (id: string) => {
+    playSoftClick();
+    const target = menuItems.find((m) => m.id === id);
+    if (!target) return;
+    onChangeMenuItems(
+      menuItems.map((m) => (m.id === id ? { ...m, source: 'shop', status: 'พร้อมขาย' } : m))
+    );
+    setStatusMsg(
+      tx(
+        `รับ "${target.name}" เข้ารายการสินค้าของร้านเรียบร้อยแล้วค่ะ (ย้ายออกจากรายการรอรับเข้าแล้ว)`,
+        `Promoted "${target.name}" into official shop catalog!`
+      )
+    );
+  };
+
   const handlePushMenuToSheets = async () => {
     playSoftClick();
     if (!scriptUrl.trim()) {
@@ -682,8 +715,8 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
     setStatusMsg(
       res.sent
         ? tx(
-            `ส่งรายการสินค้า ${menuItems.length} รายการขึ้นแท็บ "ตั้งค่าเมนู" ใน Google Sheets เรียบร้อยค่ะ`,
-            `Pushed ${menuItems.length} products to Google Sheets.`
+            `ส่งขึ้น Google Sheets ไฟล์เดียวกันแล้วค่ะ (แยกแท็บ "ตั้งค่าเมนู" ${productSourceCounts.shop} รายการ และ "สินค้าลูกค้าส่งเข้า" ${productSourceCounts.customer} รายการ · ยังไม่มีในร้าน ${productSourceCounts.missing} รายการ)`,
+            `Pushed ${productSourceCounts.shop} shop items & ${productSourceCounts.customer} customer items to separate tabs in the same Google Sheet!`
           )
         : tx(
             'บันทึกเข้าคิวออฟไลน์แล้ว ระบบจะส่งขึ้น Google Sheets เมื่อต่อเน็ตค่ะ',
@@ -2104,7 +2137,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                         <Camera className="w-4 h-4" />
                         {newProdImageUrl
                           ? tx('เปลี่ยนรูปภาพสินค้า', 'Change Product Photo')
-                          : tx('อัปโหลด / ถ่ายรูปสินค้า', 'Upload / Take Product Photo')}
+                          : tx('อัปโหลด / ถ่ายรูปสินค้า (ไม่ใส่รูปก็ได้)', 'Upload Photo (Optional)')}
                       </button>
                       {newProdImageUrl && (
                         <button
@@ -2119,14 +2152,14 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                             color: 'var(--pastel-pink-text)',
                           }}
                         >
-                          {tx('ลบรูป', 'Remove')}
+                          {tx('ไม่ใส่รูป / ลบรูป', 'Remove Photo')}
                         </button>
                       )}
                     </div>
                     <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
                       {tx(
-                        'เลือกภาพจากมือถือ กล้องถ่ายรูป หรือคอมพิวเตอร์ ระบบย่อขนาดให้อัตโนมัติค่ะ',
-                        'Choose from mobile gallery, camera, or computer (auto-compressed).'
+                        'ไม่ใส่รูปก็เพิ่มสินค้าได้ทันทีค่ะ หรือเลือกภาพจากมือถือ/คอม (ระบบย่อขนาดให้อัตโนมัติ)',
+                        'Optional — add product with or without a photo (auto-compressed).'
                       )}
                     </p>
                   </div>
@@ -2253,6 +2286,59 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                   )}
                 </div>
 
+                {/* Filter Tabs: Shop vs Customer-Submitted vs Missing from Shop */}
+                <div className="flex flex-wrap gap-1.5">
+                  {(
+                    [
+                      {
+                        id: 'all',
+                        label: tx(`ทั้งหมด (${productSourceCounts.total})`, `All (${productSourceCounts.total})`),
+                      },
+                      {
+                        id: 'shop',
+                        label: tx(
+                          `🏪 ข้อมูลในร้าน (${productSourceCounts.shop})`,
+                          `🏪 Shop Catalog (${productSourceCounts.shop})`
+                        ),
+                      },
+                      {
+                        id: 'customer',
+                        label: tx(
+                          `🙋 ลูกค้าส่งเข้ามา (${productSourceCounts.customer})`,
+                          `🙋 Customer Sent (${productSourceCounts.customer})`
+                        ),
+                      },
+                      {
+                        id: 'missing',
+                        label: tx(
+                          `🆕 ยังไม่มีในร้าน (${productSourceCounts.missing})`,
+                          `🆕 Missing in Shop (${productSourceCounts.missing})`
+                        ),
+                      },
+                    ] as const
+                  ).map((filterTab) => {
+                    const active = productSourceFilter === filterTab.id;
+                    return (
+                      <button
+                        key={filterTab.id}
+                        type="button"
+                        onClick={() => {
+                          playSoftClick();
+                          setProductSourceFilter(filterTab.id);
+                        }}
+                        className="px-3 py-1.5 rounded-xl border text-xs font-bold cursor-pointer transition-colors"
+                        style={{
+                          backgroundColor: active ? 'var(--accent-primary)' : 'var(--bg-canvas)',
+                          borderColor: active ? 'var(--accent-primary)' : 'var(--border-soft)',
+                          color: active ? '#FFFFFF' : 'var(--text-main)',
+                        }}
+                      >
+                        {filterTab.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
                 <div className="relative">
                   <Search
                     className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2"
@@ -2274,115 +2360,156 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                 <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
                   {filteredProducts.length === 0 ? (
                     <p className="text-xs text-center py-6" style={{ color: 'var(--text-muted)' }}>
-                      {tx('ไม่พบสินค้าที่ตรงกับคำค้นหาค่ะ', 'No matching products found.')}
+                      {tx('ไม่พบสินค้าในหมวดหรือคำค้นหานี้ค่ะ', 'No matching products found.')}
                     </p>
                   ) : (
-                    filteredProducts.map((item) => (
-                      <div
-                        key={item.id}
-                        className="rounded-xl border p-2.5 sm:p-3 flex items-center justify-between gap-2.5"
-                        style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
-                      >
-                        {/* Tappable Thumbnail Photo Uploader (Mobile & Desktop) */}
-                        <div className="relative shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              playSoftClick();
-                              setEditingImageItemId(item.id);
-                              editProdImageInputRef.current?.click();
-                            }}
-                            title={tx('อัปโหลด / เปลี่ยนรูปภาพสินค้า', 'Upload / Change Product Image')}
-                            className="group relative w-13 h-13 rounded-xl border overflow-hidden flex flex-col items-center justify-center cursor-pointer transition-transform active:scale-95"
-                            style={{
-                              backgroundColor: 'var(--bg-card)',
-                              borderColor: item.imageUrl ? 'var(--accent-primary)' : 'var(--border-soft)',
-                              color: 'var(--accent-text)',
-                            }}
-                          >
-                            {item.imageUrl ? (
-                              <>
-                                <img
-                                  src={item.imageUrl}
-                                  alt={item.name}
-                                  className="w-full h-full object-cover"
-                                  referrerPolicy="no-referrer"
-                                />
-                                <span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
-                                  <Camera className="w-4 h-4" />
-                                </span>
-                              </>
-                            ) : (
-                              <>
-                                <Camera className="w-4 h-4" />
-                                <span className="text-[9px] font-bold leading-tight mt-0.5">
-                                  {tx('ใส่รูป', 'Photo')}
-                                </span>
-                              </>
-                            )}
-                          </button>
-                          {item.imageUrl && (
+                    filteredProducts.map((item) => {
+                      const isCustomer = item.source === 'customer';
+                      const missingInShop = isCustomerItemMissingFromShop(item, menuItems);
+                      return (
+                        <div
+                          key={item.id}
+                          className="rounded-xl border p-2.5 sm:p-3 flex flex-wrap sm:flex-nowrap items-center justify-between gap-2.5"
+                          style={{
+                            backgroundColor: isCustomer ? '#FFFBEB' : 'var(--bg-canvas)',
+                            borderColor: isCustomer ? '#FDE68A' : 'var(--border-soft)',
+                          }}
+                        >
+                          {/* Tappable Thumbnail Photo Uploader (Mobile & Desktop) */}
+                          <div className="relative shrink-0">
                             <button
                               type="button"
-                              onClick={() => handleClearProductImage(item.id)}
-                              aria-label={tx(`ลบรูป ${item.name}`, `Remove image for ${item.name}`)}
-                              className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-rose-600 text-white flex items-center justify-center shadow cursor-pointer"
+                              onClick={() => {
+                                playSoftClick();
+                                setEditingImageItemId(item.id);
+                                editProdImageInputRef.current?.click();
+                              }}
+                              title={tx('อัปโหลด / เปลี่ยนรูปภาพสินค้า', 'Upload / Change Product Image')}
+                              className="group relative w-13 h-13 rounded-xl border overflow-hidden flex flex-col items-center justify-center cursor-pointer transition-transform active:scale-95"
+                              style={{
+                                backgroundColor: 'var(--bg-card)',
+                                borderColor: item.imageUrl ? 'var(--accent-primary)' : 'var(--border-soft)',
+                                color: 'var(--accent-text)',
+                              }}
                             >
-                              <X className="w-3 h-3" />
+                              {item.imageUrl ? (
+                                <>
+                                  <img
+                                    src={item.imageUrl}
+                                    alt={item.name}
+                                    className="w-full h-full object-cover"
+                                    referrerPolicy="no-referrer"
+                                  />
+                                  <span className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                                    <Camera className="w-4 h-4" />
+                                  </span>
+                                </>
+                              ) : (
+                                <>
+                                  <Camera className="w-4 h-4" />
+                                  <span className="text-[9px] font-bold leading-tight mt-0.5">
+                                    {tx('ใส่รูป', 'Photo')}
+                                  </span>
+                                </>
+                              )}
                             </button>
-                          )}
-                        </div>
-
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className="font-bold text-xs sm:text-sm truncate">
-                              {translateMenuName(item.name, lang)}
-                            </span>
-                            <span
-                              className="text-[11px] px-2 py-0.5 rounded-lg font-medium"
-                              style={{ backgroundColor: 'var(--bg-subtle)', color: 'var(--text-muted)' }}
-                            >
-                              {translateCategory(item.category, lang)}
-                            </span>
+                            {item.imageUrl && (
+                              <button
+                                type="button"
+                                onClick={() => handleClearProductImage(item.id)}
+                                aria-label={tx(`ลบรูป ${item.name}`, `Remove image for ${item.name}`)}
+                                className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-rose-600 text-white flex items-center justify-center shadow cursor-pointer"
+                              >
+                                <X className="w-3 h-3" />
+                              </button>
+                            )}
                           </div>
-                          <p className="text-xs font-mono mt-0.5" style={{ color: 'var(--text-muted)' }}>
-                            {tx('บาร์โค้ด:', 'Barcode:')} {item.barcode || tx('ไม่มี', 'None')} · ⭐ {item.stars}{' '}
-                            {tx('ดาว', 'stars')}
-                          </p>
-                        </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
-                          <span className="font-num font-bold text-sm">฿{item.price}</span>
-                          <button
-                            type="button"
-                            onClick={() => handleToggleProductStatus(item.id)}
-                            className="px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer"
-                            style={{
-                              backgroundColor:
-                                item.status === 'พร้อมขาย' ? 'var(--accent-soft)' : 'var(--pastel-pink)',
-                              color:
-                                item.status === 'พร้อมขาย'
-                                  ? 'var(--accent-text)'
-                                  : 'var(--pastel-pink-text)',
-                            }}
-                          >
-                            {translateStatus(item.status, lang)}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteProduct(item.id)}
-                            aria-label={tx(`ลบ ${item.name}`, `Delete ${item.name}`)}
-                            className="w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer"
-                            style={{
-                              backgroundColor: 'var(--pastel-pink)',
-                              color: 'var(--pastel-pink-text)',
-                            }}
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span
+                                className="text-[10px] px-2 py-0.5 rounded-md font-bold"
+                                style={{
+                                  backgroundColor: isCustomer ? '#FEF3C7' : 'var(--accent-soft)',
+                                  color: isCustomer ? '#92400E' : 'var(--accent-text)',
+                                }}
+                              >
+                                {isCustomer
+                                  ? tx('🙋 ลูกค้าส่งเข้ามา', '🙋 Customer Sent')
+                                  : tx('🏪 ข้อมูลในร้าน', '🏪 Shop Item')}
+                              </span>
+                              {isCustomer && (
+                                <span
+                                  className="text-[10px] px-2 py-0.5 rounded-md font-bold"
+                                  style={{
+                                    backgroundColor: missingInShop ? '#FFE4E6' : '#DCFCE7',
+                                    color: missingInShop ? '#9F1239' : '#166534',
+                                  }}
+                                >
+                                  {missingInShop
+                                    ? tx('🆕 ทางร้านยังไม่มี', '🆕 Not in shop yet')
+                                    : tx('✓ มีในร้านแล้ว', '✓ Already in shop')}
+                                </span>
+                              )}
+                              <span className="font-bold text-xs sm:text-sm truncate">
+                                {translateMenuName(item.name, lang)}
+                              </span>
+                              <span
+                                className="text-[11px] px-2 py-0.5 rounded-lg font-medium"
+                                style={{ backgroundColor: 'var(--bg-subtle)', color: 'var(--text-muted)' }}
+                              >
+                                {translateCategory(item.category, lang)}
+                              </span>
+                            </div>
+                            <p className="text-xs font-mono mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                              {tx('บาร์โค้ด:', 'Barcode:')} {item.barcode || tx('ไม่มี', 'None')} · ⭐ {item.stars}{' '}
+                              {tx('ดาว', 'stars')}
+                            </p>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                            <span className="font-num font-bold text-sm">฿{item.price}</span>
+                            {isCustomer && (
+                              <button
+                                type="button"
+                                onClick={() => handlePromoteCustomerProduct(item.id)}
+                                className="px-2.5 py-1 rounded-lg text-[11px] font-bold text-white cursor-pointer"
+                                style={{ backgroundColor: '#16A34A' }}
+                              >
+                                {tx('+ รับเข้าในร้าน', '+ Add to Shop')}
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleToggleProductStatus(item.id)}
+                              className="px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer"
+                              style={{
+                                backgroundColor:
+                                  item.status === 'พร้อมขาย' ? 'var(--accent-soft)' : 'var(--pastel-pink)',
+                                color:
+                                  item.status === 'พร้อมขาย'
+                                    ? 'var(--accent-text)'
+                                    : 'var(--pastel-pink-text)',
+                              }}
+                            >
+                              {translateStatus(item.status, lang)}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteProduct(item.id)}
+                              aria-label={tx(`ลบ ${item.name}`, `Delete ${item.name}`)}
+                              className="w-8 h-8 rounded-lg flex items-center justify-center cursor-pointer"
+                              style={{
+                                backgroundColor: 'var(--pastel-pink)',
+                                color: 'var(--pastel-pink-text)',
+                              }}
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               </div>

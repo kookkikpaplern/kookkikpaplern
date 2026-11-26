@@ -233,19 +233,39 @@ export async function flushOfflineQueue(scriptUrl: string): Promise<number> {
   return sentCount;
 }
 
+export function isCustomerItemMissingFromShop(
+  candidate: MenuItem,
+  allItems: MenuItem[]
+): boolean {
+  if (candidate.source !== 'customer') return false;
+  const shopItems = allItems.filter((m) => m.source !== 'customer');
+  const code = candidate.barcode.trim();
+  const normName = candidate.name.trim().toLowerCase();
+  return !shopItems.some((s) => {
+    if (code && s.barcode && s.barcode.trim() === code) return true;
+    return normName !== '' && s.name.trim().toLowerCase() === normName;
+  });
+}
+
 function mapMenuRows(rawRows: Array<Record<string, unknown>>): MenuItem[] {
   return rawRows.map((row, index) => {
     const rawStatus = String(row.status ?? row['สถานะ'] ?? 'พร้อมขาย').trim();
     const status: 'พร้อมขาย' | 'หมด' = rawStatus === 'หมด' ? 'หมด' : 'พร้อมขาย';
+    const rawSource = String(row.source ?? row['แหล่งที่มา'] ?? '').trim().toLowerCase();
+    const source: 'shop' | 'customer' =
+      rawSource === 'customer' || rawSource.includes('ลูกค้า') ? 'customer' : 'shop';
+    const submittedAt = String(row.submittedAt ?? row['เวลาที่ส่ง'] ?? '').trim() || undefined;
     return {
-      id: String(row.id || `sheet_${index}`),
+      id: String(row.id || `${source === 'customer' ? 'cust_sheet' : 'sheet'}_${index}`),
       barcode: String(row.barcode ?? row['เลขบาร์โค้ด'] ?? '').trim(),
       name: String(row.name ?? row['ชื่อสินค้า'] ?? 'สินค้า').trim(),
-      price: Number(row.price ?? row['ราคา'] ?? 0) || 0,
+      price: Number(row.price ?? row['ราคา'] ?? row['ราคาที่แจ้ง'] ?? 0) || 0,
       stars: Number(row.stars ?? row['จำนวนดาว'] ?? 1) || 0,
       category: String(row.category ?? row['หมวดหมู่'] ?? 'ทั่วไป').trim(),
       imageUrl: String(row.imageUrl ?? row['ลิงก์รูปภาพ'] ?? '').trim() || undefined,
       status,
+      source,
+      submittedAt,
     };
   });
 }
@@ -911,23 +931,59 @@ function readSettingsMap(ss) {
 }
 
 function readMenuRows(ss) {
-  var sheet = ss.getSheetByName('ตั้งค่าเมนู');
-  if (!sheet) return [];
-  var rows = sheet.getDataRange().getValues();
   var menu = [];
-  for (var i = 1; i < rows.length; i++) {
-    var r = rows[i];
-    if (!r[1]) continue;
-    menu.push({
-      barcode: String(r[0] || ''),
-      name: String(r[1] || ''),
-      price: Number(r[2] || 0),
-      stars: Number(r[3] || 1),
-      category: String(r[4] || 'ทั่วไป'),
-      imageUrl: String(r[5] || ''),
-      status: String(r[6] || 'พร้อมขาย')
-    });
+  var seenKey = {};
+
+  var shopSheet = ss.getSheetByName('ตั้งค่าเมนู');
+  if (shopSheet) {
+    var rows = shopSheet.getDataRange().getValues();
+    for (var i = 1; i < rows.length; i++) {
+      var r = rows[i];
+      if (!r[1]) continue;
+      var srcText = String(r[7] || '').trim();
+      var src = srcText.indexOf('ลูกค้า') >= 0 ? 'customer' : 'shop';
+      var bc = String(r[0] || '').trim();
+      var nm = String(r[1] || '').trim();
+      var k = bc || nm.toLowerCase();
+      seenKey[k] = true;
+      menu.push({
+        barcode: bc,
+        name: nm,
+        price: Number(r[2] || 0),
+        stars: Number(r[3] || 1),
+        category: String(r[4] || 'ทั่วไป'),
+        imageUrl: String(r[5] || ''),
+        status: String(r[6] || 'พร้อมขาย'),
+        source: src
+      });
+    }
   }
+
+  var custSheet = ss.getSheetByName('สินค้าลูกค้าส่งเข้า');
+  if (custSheet) {
+    var crows = custSheet.getDataRange().getValues();
+    for (var j = 1; j < crows.length; j++) {
+      var cr = crows[j];
+      if (!cr[2]) continue;
+      var cbc = String(cr[1] || '').trim();
+      var cnm = String(cr[2] || '').trim();
+      var ck = cbc || cnm.toLowerCase();
+      if (seenKey[ck]) continue;
+      seenKey[ck] = true;
+      menu.push({
+        submittedAt: String(cr[0] || ''),
+        barcode: cbc,
+        name: cnm,
+        price: Number(cr[3] || 0),
+        stars: Number(cr[4] || 1),
+        category: String(cr[5] || 'สินค้าทั่วไป'),
+        imageUrl: String(cr[6] || ''),
+        status: String(cr[7] || 'พร้อมขาย'),
+        source: 'customer'
+      });
+    }
+  }
+
   return menu;
 }
 
@@ -1048,9 +1104,20 @@ function doPost(e) {
     }
 
     if (tabName === 'ตั้งค่าเมนู' && Array.isArray(data.menu)) {
-      sheet.clearContents();
-      sheet.appendRow(['เลขบาร์โค้ด', 'ชื่อสินค้า', 'ราคา', 'จำนวนดาว', 'หมวดหมู่', 'ลิงก์รูปภาพ', 'สถานะ']);
+      var shopItems = [];
+      var customerItems = [];
       data.menu.forEach(function(m) {
+        if (String(m.source || 'shop') === 'customer') {
+          customerItems.push(m);
+        } else {
+          shopItems.push(m);
+        }
+      });
+
+      // 1) แท็บ ตั้งค่าเมนู = สินค้าข้อมูลในร้านเท่านั้น
+      sheet.clearContents();
+      sheet.appendRow(['เลขบาร์โค้ด', 'ชื่อสินค้า', 'ราคา', 'จำนวนดาว', 'หมวดหมู่', 'ลิงก์รูปภาพ', 'สถานะ', 'แหล่งที่มา']);
+      shopItems.forEach(function(m) {
         sheet.appendRow([
           m.barcode ? ("'" + m.barcode) : '',
           m.name || '',
@@ -1058,9 +1125,37 @@ function doPost(e) {
           Number(m.stars || 1),
           m.category || 'ทั่วไป',
           m.imageUrl || '',
-          m.status || 'พร้อมขาย'
+          m.status || 'พร้อมขาย',
+          'ข้อมูลในร้าน'
         ]);
       });
+
+      // 2) แท็บ สินค้าลูกค้าส่งเข้า (ใน Google Sheets ไฟล์เดียวกัน) = แยกเฉพาะที่ลูกค้าส่ง + กรองว่าตัวไหนยังไม่มีในร้าน
+      var custSheet = ss.getSheetByName('สินค้าลูกค้าส่งเข้า') || ss.insertSheet('สินค้าลูกค้าส่งเข้า');
+      custSheet.clearContents();
+      custSheet.appendRow(['เวลาที่ส่ง', 'เลขบาร์โค้ด', 'ชื่อสินค้า', 'ราคาที่แจ้ง', 'จำนวนดาว', 'หมวดหมู่', 'ลิงก์รูปภาพ', 'สถานะ', 'สถานะในร้าน']);
+      customerItems.forEach(function(c) {
+        var cCode = String(c.barcode || '').trim();
+        var cName = String(c.name || '').trim().toLowerCase();
+        var existsInShop = shopItems.some(function(s) {
+          var sCode = String(s.barcode || '').trim();
+          var sName = String(s.name || '').trim().toLowerCase();
+          if (cCode && sCode && cCode === sCode) return true;
+          return cName !== '' && sName === cName;
+        });
+        custSheet.appendRow([
+          c.submittedAt || new Date().toISOString(),
+          cCode ? ("'" + cCode) : '',
+          c.name || '',
+          Number(c.price || 0),
+          Number(c.stars || 1),
+          c.category || 'สินค้าทั่วไป',
+          c.imageUrl || '',
+          c.status || 'พร้อมขาย',
+          existsInShop ? 'มีในร้านแล้ว' : 'ยังไม่มีในร้าน'
+        ]);
+      });
+
       return jsonOut({ ok: true });
     }
 

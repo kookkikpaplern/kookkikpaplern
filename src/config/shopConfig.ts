@@ -15,6 +15,8 @@ export interface MenuItem {
   imageUrl?: string;
   status: 'พร้อมขาย' | 'หมด';
   stockMode?: 'unlimited';
+  source?: 'shop' | 'customer';
+  submittedAt?: string;
 }
 
 export interface FaqItem {

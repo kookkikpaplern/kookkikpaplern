@@ -16,6 +16,7 @@ import {
 import { MenuItem } from '../config/shopConfig';
 import { translateCategory, translateMenuName, useLang } from '../config/i18n';
 import { compressProductImageFile } from '../utils/imageUpload';
+import { isCustomerItemMissingFromShop } from '../utils/sheetsSync';
 import { playScanError, playScanSuccess, playSoftClick } from '../utils/sound';
 import { BarcodeScannerModal } from './BarcodeScannerModal';
 
@@ -39,8 +40,9 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
 }) => {
   const { lang, tx } = useLang();
 
-  // Search state
+  // Search & Source Filter state
   const [searchQuery, setSearchQuery] = useState('');
+  const [sourceFilter, setSourceFilter] = useState<'all' | 'shop' | 'customer' | 'missing'>('all');
 
   // Donation form state
   const [barcode, setBarcode] = useState('');
@@ -61,18 +63,32 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
 
   const imageInputRef = useRef<HTMLInputElement>(null);
 
-  const hasSearchQuery = searchQuery.trim().length > 0;
+  const hasSearchQuery = searchQuery.trim().length > 0 || sourceFilter !== 'all';
+
+  const counts = useMemo(() => {
+    const shop = menuItems.filter((m) => m.source !== 'customer').length;
+    const customer = menuItems.filter((m) => m.source === 'customer').length;
+    const missing = menuItems.filter((m) => isCustomerItemMissingFromShop(m, menuItems)).length;
+    return { total: menuItems.length, shop, customer, missing };
+  }, [menuItems]);
 
   const filteredItems = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
-    if (!q) return [];
-    return menuItems.filter(
+    const bySource = menuItems.filter((m) => {
+      if (sourceFilter === 'shop') return m.source !== 'customer';
+      if (sourceFilter === 'customer') return m.source === 'customer';
+      if (sourceFilter === 'missing') return isCustomerItemMissingFromShop(m, menuItems);
+      return true;
+    });
+    if (!q && sourceFilter === 'all') return [];
+    if (!q) return bySource;
+    return bySource.filter(
       (m) =>
         m.name.toLowerCase().includes(q) ||
         m.barcode.toLowerCase().includes(q) ||
         m.category.toLowerCase().includes(q)
     );
-  }, [menuItems, searchQuery]);
+  }, [menuItems, searchQuery, sourceFilter]);
 
   const cleanBarcode = barcode.trim();
   const duplicateItem = useMemo(() => {
@@ -146,65 +162,54 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
       return;
     }
 
-    if (!imageUrl) {
-      playScanError();
-      setFeedback({
-        type: 'err',
-        text: tx(
-          'กรุณาอัปโหลดรูปภาพสินค้าก่อนบันทึกนะคะ (ระบบจะตรวจสอบรูปสินค้าก่อนนำเข้า)',
-          'Please upload a product photo before submitting.'
-        ),
-      });
-      return;
-    }
-
-    // AI ตรวจคัดกรองรูปภาพก่อนบันทึก (บล็อกคน สัตว์ รูปไม่เหมาะสม หรือรูปไม่เกี่ยวข้องทันที หากเชื่อมต่อ AI ได้)
+    // AI ตรวจคัดกรองรูปภาพก่อนบันทึก (เฉพาะกรณีแนบรูป — หากไม่ใส่รูปก็บันทึกได้ทันที)
     let aiSkippedNote = '';
-    setIsVerifyingAi(true);
-    try {
-      const res = await fetch('/api/verify-product-image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageDataUrl: imageUrl,
-          productName,
-          lang,
-        }),
-      });
-      if (res.ok) {
-        const data = (await res.json().catch(() => ({}))) as {
-          allowed?: boolean;
-          reason?: string;
-        };
+    if (imageUrl) {
+      setIsVerifyingAi(true);
+      try {
+        const res = await fetch('/api/verify-product-image', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            imageDataUrl: imageUrl,
+            productName,
+            lang,
+          }),
+        });
+        if (res.ok) {
+          const data = (await res.json().catch(() => ({}))) as {
+            allowed?: boolean;
+            reason?: string;
+          };
 
-        if (data.allowed === false) {
-          playScanError();
-          setFeedback({
-            type: 'err',
-            text:
-              data.reason ||
-              tx(
-                'รูปภาพไม่ผ่านการคัดกรอง (อนุญาตเฉพาะภาพสินค้าเท่านั้น) ระบบจึงปฏิเสธการบันทึกค่ะ',
-                'Image blocked by AI screening (only product photos are allowed).'
-              ),
-          });
-          setIsVerifyingAi(false);
-          return;
+          if (data.allowed === false) {
+            playScanError();
+            setFeedback({
+              type: 'err',
+              text:
+                data.reason ||
+                tx(
+                  'รูปภาพไม่ผ่านการคัดกรอง (อนุญาตเฉพาะภาพสินค้าเท่านั้น) ระบบจึงปฏิเสธการบันทึกค่ะ',
+                  'Image blocked by AI screening (only product photos are allowed).'
+                ),
+            });
+            setIsVerifyingAi(false);
+            return;
+          }
+        } else {
+          aiSkippedNote = tx(
+            ' (ข้ามการตรวจภาพ AI ชั่วคราว)',
+            ' (AI photo check unavailable)'
+          );
         }
-      } else {
+      } catch {
         aiSkippedNote = tx(
           ' (ข้ามการตรวจภาพ AI ชั่วคราว)',
           ' (AI photo check unavailable)'
         );
       }
-    } catch {
-      aiSkippedNote = tx(
-        ' (ข้ามการตรวจภาพ AI ชั่วคราว)',
-        ' (AI photo check unavailable)'
-      );
+      setIsVerifyingAi(false);
     }
-
-    setIsVerifyingAi(false);
 
     const parsedPrice = Math.max(0, Number(priceStr) || 0);
     const newItem: MenuItem = {
@@ -214,9 +219,11 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
       price: parsedPrice,
       stars: Math.max(1, Math.floor(parsedPrice / 20) || 1),
       category: productCategory,
-      imageUrl,
+      imageUrl: imageUrl || undefined,
       status: 'พร้อมขาย',
       stockMode: 'unlimited',
+      source: 'customer',
+      submittedAt: new Date().toISOString(),
     };
 
     const result = onDonateProduct(newItem);
@@ -237,11 +244,12 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
     setPriceStr('');
     setImageUrl('');
     setSearchQuery('');
+    const isMissingFromShop = isCustomerItemMissingFromShop(newItem, menuItems);
     setFeedback({
       type: 'ok',
       text: tx(
-        `เพิ่ม "${productName}" (${code}) เข้าคลังสินค้า POS และหลังบ้านอัตโนมัติเรียบร้อยแล้วค่ะ พร้อมยิงบาร์โค้ดคิดเงินทันที!${aiSkippedNote}`,
-        `Added "${productName}" (${code}) to POS & backend catalog automatically!${aiSkippedNote}`
+        `ส่งสินค้า "${productName}" (${code}) เข้าหมวด "สินค้าลูกค้าส่งเข้า" เรียบร้อยแล้วค่ะ (${isMissingFromShop ? 'สถานะ: ทางร้านยังไม่มี' : 'สถานะ: มีชื่อซ้ำกับในร้าน'}) แยกจากสินค้าหลักของร้านและส่งเข้าชีตเดียวกันเรียบร้อย!${aiSkippedNote}`,
+        `Submitted "${productName}" (${code}) to Customer Contributions (${isMissingFromShop ? 'Not in shop yet' : 'Matches shop item'})!${aiSkippedNote}`
       ),
     });
   };
@@ -313,6 +321,38 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
             </div>
           </div>
 
+          {/* Source Separation Filter Tabs */}
+          <div className="flex flex-wrap gap-1.5">
+            {(
+              [
+                { id: 'all', label: tx(`ค้นหาทั้งหมด (${counts.total})`, `All (${counts.total})`) },
+                { id: 'shop', label: tx(`🏪 ข้อมูลในร้าน (${counts.shop})`, `🏪 Shop (${counts.shop})`) },
+                { id: 'customer', label: tx(`🙋 ลูกค้าส่งเข้ามา (${counts.customer})`, `🙋 Customer Sent (${counts.customer})`) },
+                { id: 'missing', label: tx(`🆕 ทางร้านยังไม่มี (${counts.missing})`, `🆕 Missing in Shop (${counts.missing})`) },
+              ] as const
+            ).map((tab) => {
+              const active = sourceFilter === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => {
+                    playSoftClick();
+                    setSourceFilter(tab.id);
+                  }}
+                  className="px-2.5 py-1.5 rounded-xl border text-[11px] font-bold cursor-pointer transition-colors"
+                  style={{
+                    backgroundColor: active ? 'var(--accent-primary)' : 'var(--bg-canvas)',
+                    borderColor: active ? 'var(--accent-primary)' : 'var(--border-soft)',
+                    color: active ? '#FFFFFF' : 'var(--text-main)',
+                  }}
+                >
+                  {tab.label}
+                </button>
+              );
+            })}
+          </div>
+
           {!hasSearchQuery ? (
             <div
               className="rounded-2xl border border-dashed p-6 text-center space-y-2"
@@ -321,14 +361,14 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
               <Search className="w-8 h-8 mx-auto opacity-45" style={{ color: 'var(--accent-text)' }} />
               <p className="text-sm font-semibold" style={{ color: 'var(--text-main)' }}>
                 {tx(
-                  'พิมพ์ชื่อสินค้าหรือเลขบาร์โค้ดเพื่อค้นหาในระบบ',
-                  'Type a product name or barcode to search'
+                  'พิมพ์ชื่อสินค้าหรือเลขบาร์โค้ด หรือกดปุ่มแยกหมวดด้านบนเพื่อดูรายการ',
+                  'Type a product name/barcode or tap a filter tab above to browse'
                 )}
               </p>
               <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
                 {tx(
-                  'ตรวจสอบได้ทันทีว่าสินค้านี้มีบาร์โค้ดแล้วหรือยัง หรือกรอกข้อมูลบริจาคทางด้านขวาได้เลยค่ะ',
-                  'Check whether a product barcode exists, or contribute a new one on the right.'
+                  'ระบบแยก "ข้อมูลในร้าน" กับ "สินค้าที่ลูกค้าส่งเข้ามา (ทางร้านยังไม่มี)" ให้อัตโนมัติค่ะ',
+                  'Automatically separates shop items vs customer submissions not yet in shop.'
                 )}
               </p>
             </div>
@@ -339,52 +379,85 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
             >
               <Package className="w-8 h-8 mx-auto opacity-45" style={{ color: 'var(--accent-text)' }} />
               <p className="text-sm font-semibold" style={{ color: 'var(--text-main)' }}>
-                {tx('ยังไม่พบสินค้าที่ตรงกับคำค้นหาค่ะ', 'No matching barcode items found.')}
+                {tx('ยังไม่พบสินค้าในหมวดหรือคำค้นหานี้ค่ะ', 'No matching barcode items found.')}
               </p>
               <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
                 {tx(
-                  'ช่วยบริจาคบาร์โค้ดและรูปภาพสินค้านี้ทางด้านขวาได้เลยนะคะ',
-                  'You can contribute this barcode and product photo on the right!'
+                  'ช่วยเพิ่มบาร์โค้ดหรือชื่อสินค้านี้ทางด้านขวาได้เลยนะคะ',
+                  'You can submit this product barcode on the right!'
                 )}
               </p>
             </div>
           ) : (
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 max-h-[420px] overflow-y-auto pr-1">
-              {filteredItems.map((item) => (
-                <div
-                  key={item.id}
-                  className="rounded-2xl border p-3 flex items-center gap-3"
-                  style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
-                >
+              {filteredItems.map((item) => {
+                const isCustomer = item.source === 'customer';
+                const missingInShop = isCustomerItemMissingFromShop(item, menuItems);
+                return (
                   <div
-                    className="w-14 h-14 rounded-xl border overflow-hidden flex items-center justify-center shrink-0"
-                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                    key={item.id}
+                    className="rounded-2xl border p-3 flex items-center gap-3"
+                    style={{
+                      backgroundColor: isCustomer ? '#FFFBEB' : 'var(--bg-canvas)',
+                      borderColor: isCustomer ? '#FDE68A' : 'var(--border-soft)',
+                    }}
                   >
-                    {item.imageUrl ? (
-                      <img
-                        src={item.imageUrl}
-                        alt={translateMenuName(item.name, lang)}
-                        className="w-full h-full object-cover"
-                        referrerPolicy="no-referrer"
-                      />
-                    ) : (
-                      <Package className="w-6 h-6 opacity-40" style={{ color: 'var(--accent-text)' }} />
-                    )}
+                    <div
+                      className="w-14 h-14 rounded-xl border overflow-hidden flex items-center justify-center shrink-0"
+                      style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                    >
+                      {item.imageUrl ? (
+                        <img
+                          src={item.imageUrl}
+                          alt={translateMenuName(item.name, lang)}
+                          className="w-full h-full object-cover"
+                          referrerPolicy="no-referrer"
+                        />
+                      ) : (
+                        <Package className="w-6 h-6 opacity-40" style={{ color: 'var(--accent-text)' }} />
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1 space-y-0.5">
+                      <div className="flex flex-wrap items-center gap-1">
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded-md font-bold"
+                          style={{
+                            backgroundColor: isCustomer ? '#FEF3C7' : 'var(--accent-soft)',
+                            color: isCustomer ? '#92400E' : 'var(--accent-text)',
+                          }}
+                        >
+                          {isCustomer
+                            ? tx('🙋 ลูกค้าส่ง', '🙋 Customer')
+                            : tx('🏪 ในร้าน', '🏪 Shop')}
+                        </span>
+                        {isCustomer && (
+                          <span
+                            className="text-[10px] px-1.5 py-0.5 rounded-md font-bold"
+                            style={{
+                              backgroundColor: missingInShop ? '#FFE4E6' : '#DCFCE7',
+                              color: missingInShop ? '#9F1239' : '#166534',
+                            }}
+                          >
+                            {missingInShop
+                              ? tx('ทางร้านยังไม่มี', 'Not in shop yet')
+                              : tx('มีในร้านแล้ว', 'In shop')}
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-sm font-bold truncate" style={{ color: 'var(--text-main)' }}>
+                        {translateMenuName(item.name, lang)}
+                      </p>
+                      <p className="text-xs font-mono truncate" style={{ color: 'var(--accent-text)' }}>
+                        {item.barcode || tx('ไม่มีบาร์โค้ด', 'No barcode')}
+                      </p>
+                      <p className="text-[11px] truncate" style={{ color: 'var(--text-muted)' }}>
+                        {translateCategory(item.category, lang)}
+                        {item.price > 0 ? ` · ฿${item.price.toLocaleString('th-TH')}` : ''}
+                      </p>
+                    </div>
                   </div>
-                  <div className="min-w-0 flex-1 space-y-0.5">
-                    <p className="text-sm font-bold truncate" style={{ color: 'var(--text-main)' }}>
-                      {translateMenuName(item.name, lang)}
-                    </p>
-                    <p className="text-xs font-mono truncate" style={{ color: 'var(--accent-text)' }}>
-                      {item.barcode || tx('ไม่มีบาร์โค้ด', 'No barcode')}
-                    </p>
-                    <p className="text-[11px] truncate" style={{ color: 'var(--text-muted)' }}>
-                      {translateCategory(item.category, lang)}
-                      {item.price > 0 ? ` · ฿${item.price.toLocaleString('th-TH')}` : ''}
-                    </p>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </div>
@@ -595,7 +668,9 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
                   }}
                 >
                   <Upload className="w-3.5 h-3.5" />
-                  {imageUrl ? tx('เปลี่ยนรูปสินค้า', 'Change Photo') : tx('ถ่าย / เลือกรูปสินค้า *', 'Upload Product Photo *')}
+                  {imageUrl
+                    ? tx('เปลี่ยนรูปสินค้า', 'Change Photo')
+                    : tx('ถ่าย / เลือกรูปสินค้า (ไม่ใส่รูปก็ได้)', 'Upload Photo (Optional)')}
                 </button>
                 {imageUrl && (
                   <button
@@ -610,14 +685,14 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
                       color: 'var(--pastel-pink-text)',
                     }}
                   >
-                    {tx('ลบรูป', 'Remove')}
+                    {tx('ไม่ใส่รูป / ลบรูป', 'Remove Photo')}
                   </button>
                 )}
               </div>
               <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
                 {tx(
-                  'ย่อขนาดรูปอัตโนมัติ · อนุญาตเฉพาะภาพสินค้าเท่านั้น (บล็อกรูปคน สัตว์เลี้ยง และรูปไม่เกี่ยวข้อง)',
-                  'Auto-resized · Product photos only (humans, pets, and unrelated images blocked)'
+                  'ไม่ใส่รูปก็กดบันทึกได้ทันทีค่ะ · หากใส่รูป ระบบจะย่อขนาดและคัดกรองภาพสินค้าให้อัตโนมัติ',
+                  'Photo is optional — save anytime without an image, or upload a product photo.'
                 )}
               </p>
             </div>
