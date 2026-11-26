@@ -33,6 +33,10 @@ export interface CustomerQueueOrder {
   customerName?: string;
   dropPoint?: string;
   slipImageUrl?: string;
+  slipVerifyStatus?: 'verified' | 'unverified' | 'manual_line';
+  slipDetectedAmount?: number;
+  slipTransactionRef?: string;
+  slipVerifyNote?: string;
   accepted?: boolean;
   createdAt: string;
   status: 'กำลังทำ' | 'เสร็จแล้ว';
@@ -401,6 +405,11 @@ function mapOnlineOrderRows(rawRows: Array<Record<string, unknown>>): CustomerQu
       const statusRaw = String(row.status || 'กำลังทำ');
       const status: 'กำลังทำ' | 'เสร็จแล้ว' = statusRaw === 'เสร็จแล้ว' ? 'เสร็จแล้ว' : 'กำลังทำ';
       const slipRaw = String(row.slipImageUrl || '').trim();
+      const verifyRaw = String(row.slipVerifyStatus || '').trim();
+      const slipVerifyStatus: 'verified' | 'unverified' | 'manual_line' | undefined =
+        verifyRaw === 'verified' || verifyRaw === 'unverified' || verifyRaw === 'manual_line'
+          ? verifyRaw
+          : undefined;
       return {
         queueNo: Number(row.queueNo) || idx + 1,
         orderId: String(row.orderId || `ORD_${idx + 1}`),
@@ -413,6 +422,13 @@ function mapOnlineOrderRows(rawRows: Array<Record<string, unknown>>): CustomerQu
         customerName: String(row.customerName || '').trim() || undefined,
         dropPoint: dropPointRaw || undefined,
         slipImageUrl: slipRaw || undefined,
+        slipVerifyStatus,
+        slipDetectedAmount:
+          row.slipDetectedAmount !== undefined && row.slipDetectedAmount !== ''
+            ? Number(row.slipDetectedAmount) || undefined
+            : undefined,
+        slipTransactionRef: String(row.slipTransactionRef || '').trim() || undefined,
+        slipVerifyNote: String(row.slipVerifyNote || '').trim() || undefined,
         accepted: String(row.accepted || '').toLowerCase() === 'true',
         createdAt: String(row.createdAt || new Date().toISOString()),
         status,

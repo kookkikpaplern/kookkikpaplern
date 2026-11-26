@@ -1,17 +1,21 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Building2,
   Check,
+  Clock,
   Copy,
   Delete,
   Download,
   ExternalLink,
   Gift,
   ImagePlus,
+  Loader2,
   LockKeyhole,
   MessageCircle,
   Paperclip,
   PauseCircle,
+  ShieldCheck,
   Star,
   Trash2,
   UserPlus,
@@ -27,6 +31,7 @@ import {
   BillLineItem,
   checkAutoPaymentFromSheets,
   CustomerMember,
+  CustomerQueueOrder,
   findMemberByPhoneOrLast4,
   generateNextMemberId,
   getMembersCache,
@@ -258,6 +263,13 @@ export const CashPaymentModal: React.FC<CashPaymentModalProps> = ({
 };
 
 /* ==================== 2. PROMPTPAY QR MODAL ==================== */
+export interface SlipVerifyMeta {
+  verifyStatus: 'verified' | 'unverified' | 'manual_line';
+  detectedAmount?: number;
+  transactionRef?: string;
+  verifyNote?: string;
+}
+
 interface QrPaymentModalProps {
   isOpen: boolean;
   amount: number;
@@ -274,8 +286,13 @@ interface QrPaymentModalProps {
   outfits?: BearFamilyOutfits;
   allowSlipUpload?: boolean;
   lineShopUrl?: string;
+  roomId?: string;
   onClose: () => void;
-  onConfirmPaid: (slipImageUrl?: string, bankAccountLabel?: string) => void;
+  onConfirmPaid: (
+    slipImageUrl?: string,
+    bankAccountLabel?: string,
+    slipMeta?: SlipVerifyMeta
+  ) => void;
 }
 
 export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
@@ -294,6 +311,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
   outfits,
   allowSlipUpload = false,
   lineShopUrl = '',
+  roomId = 'KKP2027',
   onClose,
   onConfirmPaid,
 }) => {
@@ -302,7 +320,9 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
   const [isAutoPolling, setIsAutoPolling] = useState(false);
   const [slipImageUrl, setSlipImageUrl] = useState('');
   const [slipError, setSlipError] = useState('');
+  const [slipVerifyMeta, setSlipVerifyMeta] = useState<SlipVerifyMeta | null>(null);
   const [isCompressingSlip, setIsCompressingSlip] = useState(false);
+  const [isVerifyingSlip, setIsVerifyingSlip] = useState(false);
   const [slipZoomOpen, setSlipZoomOpen] = useState(false);
   const [copiedAccountNo, setCopiedAccountNo] = useState(false);
   const [lineBackupConfirmed, setLineBackupConfirmed] = useState(false);
@@ -353,7 +373,9 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
     if (!isOpen) {
       setSlipImageUrl('');
       setSlipError('');
+      setSlipVerifyMeta(null);
       setIsCompressingSlip(false);
+      setIsVerifyingSlip(false);
       setSlipZoomOpen(false);
       setLineBackupConfirmed(false);
       setQrUrl('');
@@ -382,12 +404,21 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
     const interval = window.setInterval(async () => {
       const paid = await checkAutoPaymentFromSheets(scriptUrl, amount);
       if (paid) {
-        onConfirmPaid(slipImageUrl || undefined, bankLabel);
+        onConfirmPaid(slipImageUrl || undefined, bankLabel, slipVerifyMeta || undefined);
       }
     }, 3000);
 
     return () => window.clearInterval(interval);
-  }, [isOpen, enableAutoPaymentCheck, scriptUrl, amount, onConfirmPaid, slipImageUrl, bankLabel]);
+  }, [
+    isOpen,
+    enableAutoPaymentCheck,
+    scriptUrl,
+    amount,
+    onConfirmPaid,
+    slipImageUrl,
+    bankLabel,
+    slipVerifyMeta,
+  ]);
 
   if (!isOpen) return null;
 
@@ -397,21 +428,98 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
     if (!file) return;
     playSoftClick();
     setSlipError('');
+    setSlipVerifyMeta(null);
+    setSlipImageUrl('');
     setIsCompressingSlip(true);
+
+    let compressed = '';
     try {
-      const compressed = await compressSlipImageFile(file);
-      setSlipImageUrl(compressed);
-      playScanSuccess();
+      compressed = await compressSlipImageFile(file);
     } catch {
       playScanError();
+      setIsCompressingSlip(false);
       setSlipError(
         tx(
           'ไม่สามารถอ่านรูปสลิปได้ กรุณาเลือกไฟล์ JPG หรือ PNG ค่ะ',
           'Could not read slip image. Please select a JPG or PNG file.'
         )
       );
+      return;
     } finally {
       setIsCompressingSlip(false);
+    }
+
+    setIsVerifyingSlip(true);
+    try {
+      const res = await fetch('/api/verify-slip', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          slipImageUrl: compressed,
+          expectedAmount: amount,
+          expectedAccountName: selectedAccount?.accountName || promptPayAccountName,
+          expectedPromptPayId: activePromptPayTarget || selectedAccount?.accountNumber || promptPayId,
+          roomId,
+          lang,
+        }),
+      });
+      const data = (await res.json()) as {
+        verified?: boolean;
+        status?: 'verified' | 'rejected' | 'unverified_ai_error';
+        detectedAmount?: number;
+        transactionRef?: string;
+        reason?: string;
+      };
+
+      if (data.status === 'rejected') {
+        playScanError();
+        setSlipImageUrl('');
+        setSlipVerifyMeta(null);
+        setSlipError(
+          data.reason ||
+            tx(
+              'สลิปไม่ถูกต้องหรือยอดเงินไม่ตรงกับรายการสั่งซื้อ กรุณาตรวจสอบและแนบใหม่อีกครั้งค่ะ',
+              'Slip is invalid or amount does not match the order total.'
+            )
+        );
+        return;
+      }
+
+      if (data.status === 'verified' && data.verified) {
+        setSlipImageUrl(compressed);
+        setSlipVerifyMeta({
+          verifyStatus: 'verified',
+          detectedAmount: data.detectedAmount,
+          transactionRef: data.transactionRef,
+          verifyNote: data.reason,
+        });
+        playScanSuccess();
+        return;
+      }
+
+      // AI unavailable fallback: attach slip, mark strictly as unverified (store must inspect manually)
+      setSlipImageUrl(compressed);
+      setSlipVerifyMeta({
+        verifyStatus: 'unverified',
+        verifyNote:
+          data.reason ||
+          tx(
+            'ระบบตรวจสลิปอัตโนมัติไม่ว่างชั่วคราว · รอร้านตรวจยอดเงินเข้าบัญชีด้วยตนเอง',
+            'Auto slip verification unavailable · Waiting for manual shop verification'
+          ),
+      });
+      playSoftClick();
+    } catch {
+      setSlipImageUrl(compressed);
+      setSlipVerifyMeta({
+        verifyStatus: 'unverified',
+        verifyNote: tx(
+          'ไม่สามารถเชื่อมต่อระบบตรวจสลิปอัตโนมัติ · รอร้านตรวจยอดเงินเข้าบัญชีด้วยตนเอง',
+          'Could not reach auto slip check · Waiting for manual shop verification'
+        ),
+      });
+    } finally {
+      setIsVerifyingSlip(false);
     }
   };
 
@@ -622,10 +730,25 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                   </p>
                   {slipImageUrl && (
                     <span
-                      className="px-2 py-0.5 rounded-lg text-[11px] font-bold"
-                      style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
+                      className="px-2 py-0.5 rounded-lg text-[11px] font-bold inline-flex items-center gap-1"
+                      style={{
+                        backgroundColor:
+                          slipVerifyMeta?.verifyStatus === 'verified' ? '#DCFCE7' : '#FEF3C7',
+                        color:
+                          slipVerifyMeta?.verifyStatus === 'verified' ? '#166534' : '#92400E',
+                      }}
                     >
-                      {tx('แนบสลิปแล้ว', 'Slip Attached')}
+                      {slipVerifyMeta?.verifyStatus === 'verified' ? (
+                        <>
+                          <ShieldCheck className="w-3 h-3" />
+                          {tx('สลิปตรงยอด', 'Amount Matched')}
+                        </>
+                      ) : (
+                        <>
+                          <Clock className="w-3 h-3" />
+                          {tx('รอร้านตรวจสลิป', 'Manual Check')}
+                        </>
+                      )}
                     </span>
                   )}
                 </div>
@@ -660,8 +783,15 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                       </span>
                     </button>
                     <div className="flex-1 space-y-1.5 min-w-0">
-                      <p className="text-xs font-bold" style={{ color: 'var(--accent-text)' }}>
-                        {tx('ย่อขนาดรูปอัตโนมัติพร้อมส่งแล้วค่ะ', 'Auto-resized & ready to send with order')}
+                      <p
+                        className="text-xs font-bold"
+                        style={{
+                          color:
+                            slipVerifyMeta?.verifyStatus === 'verified' ? '#15803D' : '#B45309',
+                        }}
+                      >
+                        {slipVerifyMeta?.verifyNote ||
+                          tx('พร้อมส่งให้ทางร้านตรวจสอบแล้วค่ะ', 'Ready to send for shop verification')}
                       </p>
                       <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
                         {tx('แตะที่รูปสลิปเพื่อขยายตรวจดูความชัดเจนได้ค่ะ', 'Tap preview image to inspect clearly')}
@@ -683,6 +813,8 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                           onClick={() => {
                             playSoftClick();
                             setSlipImageUrl('');
+                            setSlipVerifyMeta(null);
+                            setSlipError('');
                           }}
                           className="px-2.5 py-1.5 rounded-xl text-xs font-bold flex items-center gap-1 cursor-pointer"
                           style={{ backgroundColor: 'var(--pastel-pink)', color: 'var(--pastel-pink-text)' }}
@@ -697,7 +829,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                   <div className="space-y-1.5">
                     <button
                       type="button"
-                      disabled={isCompressingSlip}
+                      disabled={isCompressingSlip || isVerifyingSlip}
                       onClick={() => {
                         playSoftClick();
                         slipInputRef.current?.click();
@@ -709,22 +841,34 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                         color: 'var(--accent-text)',
                       }}
                     >
-                      <Paperclip className="w-4 h-4" />
+                      {isVerifyingSlip ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Paperclip className="w-4 h-4" />
+                      )}
                       {isCompressingSlip
                         ? tx('กำลังย่อขนาดรูปสลิป...', 'Compressing slip image...')
-                        : tx('แนบสลิปโอนเงิน', 'Attach Transfer Slip')}
+                        : isVerifyingSlip
+                          ? tx('กำลังตรวจสอบยอดเงินในสลิป...', 'Verifying slip amount...')
+                          : tx('แนบสลิปโอนเงิน', 'Attach Transfer Slip')}
                     </button>
                     <p className="text-[11px] text-center" style={{ color: 'var(--text-muted)' }}>
                       {tx(
-                        'เลือกรูปสลิปจากมือถือหรือคอม ย่อขนาดอัตโนมัติส่งไวไม่ค้าง',
-                        'Select slip photo from phone or PC · Auto-resized for fast upload'
+                        'ระบบจะตรวจสอบยอดเงินในสลิปอัตโนมัติ หากยอดไม่ตรงจะไม่สามารถส่งออเดอร์ได้ค่ะ',
+                        'System checks transfer amount automatically · Wrong-amount slips are blocked'
                       )}
                     </p>
                   </div>
                 )}
 
                 {slipError && (
-                  <p className="text-xs font-semibold text-rose-600">{slipError}</p>
+                  <div
+                    className="rounded-xl border px-3 py-2 text-xs font-bold flex items-start gap-2"
+                    style={{ backgroundColor: '#FFE4E6', borderColor: '#FDA4AF', color: '#BE123C' }}
+                  >
+                    <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                    <span>{slipError}</span>
+                  </div>
                 )}
 
                 {/* Small Secondary Backup LINE Button */}
@@ -798,15 +942,32 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
               </button>
               <button
                 type="button"
-                disabled={isCompressingSlip || (allowSlipUpload && !slipImageUrl && !lineBackupConfirmed)}
-                onClick={() => onConfirmPaid(slipImageUrl || undefined, bankLabel)}
+                disabled={
+                  isCompressingSlip ||
+                  isVerifyingSlip ||
+                  (allowSlipUpload && !slipImageUrl && !lineBackupConfirmed)
+                }
+                onClick={() => {
+                  const meta: SlipVerifyMeta | undefined = allowSlipUpload
+                    ? slipImageUrl
+                      ? slipVerifyMeta || { verifyStatus: 'unverified' }
+                      : {
+                          verifyStatus: 'manual_line',
+                          verifyNote: tx(
+                            'ลูกค้าเลือกส่งสลิปทาง LINE สำรอง · รอร้านตรวจยอดเข้าบัญชีก่อนรับออเดอร์',
+                            'Customer opted for LINE backup slip · Waiting for manual shop verification'
+                          ),
+                        }
+                    : undefined;
+                  onConfirmPaid(slipImageUrl || undefined, bankLabel, meta);
+                }}
                 className="col-span-2 h-14 rounded-2xl font-bold text-base sm:text-lg text-white cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed transition-transform active:scale-95"
-                style={{ backgroundColor: '#16A34A' }}
+                style={{ backgroundColor: allowSlipUpload ? '#0369A1' : '#16A34A' }}
               >
                 {allowSlipUpload
                   ? slipImageUrl
-                    ? tx('ยืนยันคำสั่งซื้อ & ส่งสลิป ✓', 'Confirm Order & Send Slip ✓')
-                    : tx('แจ้งโอน & ส่งออเดอร์ ✓', 'Notify Payment & Send Order ✓')
+                    ? tx('ส่งออเดอร์ & สลิปให้ร้านตรวจสอบ ✓', 'Send Order & Slip for Verification ✓')
+                    : tx('ส่งออเดอร์ (รอตรวจสลิปทาง LINE) ✓', 'Send Order (LINE Slip Check) ✓')
                   : tx('โอนเรียบร้อยแล้ว ✓', 'Payment Confirmed ✓')}
               </button>
             </div>
@@ -871,6 +1032,7 @@ interface PaymentSuccessOverlayProps {
   receiptSlipEnabled?: boolean;
   exitScannerEnabled?: boolean;
   receiptData?: ReceiptSlipRecord | null;
+  pendingOrder?: CustomerQueueOrder | null;
   onClose: () => void;
 }
 
@@ -888,6 +1050,7 @@ export const PaymentSuccessOverlay: React.FC<PaymentSuccessOverlayProps> = ({
   receiptSlipEnabled = true,
   exitScannerEnabled = true,
   receiptData,
+  pendingOrder,
   onClose,
 }) => {
   const { lang, tx } = useLang();
@@ -908,6 +1071,9 @@ export const PaymentSuccessOverlay: React.FC<PaymentSuccessOverlayProps> = ({
   const [adminPinError, setAdminPinError] = useState('');
 
   const cardCanvasRef = useRef<HTMLCanvasElement>(null);
+  const lastSpokenStateRef = useRef<string>('');
+
+  const isWaitingMerchant = Boolean(pendingOrder && !pendingOrder.accepted);
 
   useEffect(() => {
     if (!isOpen) {
@@ -918,16 +1084,29 @@ export const PaymentSuccessOverlay: React.FC<PaymentSuccessOverlayProps> = ({
       setShowRedeemPinModal(false);
       setAdminPinInput('');
       setAdminPinError('');
+      lastSpokenStateRef.current = '';
       return;
     }
 
-    const cleanAmount = Number.isInteger(amount) ? String(amount) : amount.toFixed(2);
-    const spoken =
-      lang === 'en'
-        ? `Received ${cleanAmount} baht. Payment confirmed, thank you!`
-        : `ได้รับเงิน ${cleanAmount} บาท เรียบร้อยแล้วค่ะ ขอบคุณค่ะ`;
-    speakMessage(spoken, lang);
-  }, [isOpen, amount, lang]);
+    const stateKey = isWaitingMerchant ? 'waiting' : 'confirmed';
+    if (lastSpokenStateRef.current === stateKey) return;
+    lastSpokenStateRef.current = stateKey;
+
+    if (isWaitingMerchant) {
+      const spokenPending =
+        lang === 'en'
+          ? 'Your order and slip have been sent to the shop. Please wait while the staff verifies your payment.'
+          : 'ส่งคำสั่งซื้อและสลิปเข้าร้านแล้วค่ะ กรุณารอพนักงานตรวจสอบยอดเงินสักครู่นะคะ';
+      speakMessage(spokenPending, lang);
+    } else {
+      const cleanAmount = Number.isInteger(amount) ? String(amount) : amount.toFixed(2);
+      const spoken =
+        lang === 'en'
+          ? `Received ${cleanAmount} baht. Payment confirmed, thank you!`
+          : `ได้รับเงิน ${cleanAmount} บาท เรียบร้อยแล้วค่ะ ขอบคุณค่ะ`;
+      speakMessage(spoken, lang);
+    }
+  }, [isOpen, amount, lang, isWaitingMerchant]);
 
   if (!isOpen) return null;
 
@@ -1173,7 +1352,11 @@ export const PaymentSuccessOverlay: React.FC<PaymentSuccessOverlayProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-emerald-600 text-white p-4 sm:p-6 flex flex-col items-center justify-center">
+    <div
+      className={`fixed inset-0 z-50 overflow-y-auto text-white p-4 sm:p-6 flex flex-col items-center justify-center transition-colors ${
+        isWaitingMerchant ? 'bg-amber-600' : 'bg-emerald-600'
+      }`}
+    >
       <div className="w-full max-w-2xl space-y-5 my-auto">
         {/* Celebrating Bears with Stars */}
         {mascotMode === 'krua' ? (
@@ -1182,34 +1365,76 @@ export const PaymentSuccessOverlay: React.FC<PaymentSuccessOverlayProps> = ({
           <BearGangMascot pose="celebrating" outfits={outfits} />
         )}
 
-        <div className="text-center space-y-1 print:hidden">
+        <div className="text-center space-y-1.5 print:hidden">
           <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/20 text-white font-semibold text-sm">
-            <Check className="w-4 h-4" />
-            {tx('ชำระเงินสำเร็จเรียบร้อยแล้วค่ะ', 'Payment Successful!')}
+            {isWaitingMerchant ? (
+              <>
+                <Clock className="w-4 h-4" />
+                {tx(
+                  'ส่งคำสั่งซื้อและสลิปเข้าร้านแล้ว · รอร้านตรวจสอบยอดเงิน',
+                  'Order & Slip Sent · Waiting for Shop Verification'
+                )}
+              </>
+            ) : (
+              <>
+                <Check className="w-4 h-4" />
+                {pendingOrder
+                  ? tx(
+                      'ร้านตรวจสอบสลิปและรับออเดอร์เรียบร้อยแล้วค่ะ ✓',
+                      'Shop Verified Slip & Accepted Order ✓'
+                    )
+                  : tx('ชำระเงินสำเร็จเรียบร้อยแล้วค่ะ', 'Payment Successful!')}
+              </>
+            )}
           </div>
+          {pendingOrder && (
+            <p className="text-sm font-bold text-white/95">
+              {tx(`คิวที่ #${pendingOrder.queueNo}`, `Queue #${pendingOrder.queueNo}`)} · #{pendingOrder.orderId}
+            </p>
+          )}
           <h2 className="font-num text-5xl sm:text-6xl font-extrabold tracking-tight tabular-nums">
             ฿{amount.toLocaleString('th-TH')}
           </h2>
-          <p className="text-emerald-100 text-lg font-medium">
-            {tx(`บิลนี้ได้รับ ⭐ +${starsToGrant} ดาว`, `This bill earned ⭐ +${starsToGrant} Stars`)}
+          <p className={`${isWaitingMerchant ? 'text-amber-50' : 'text-emerald-100'} text-base sm:text-lg font-medium`}>
+            {isWaitingMerchant
+              ? tx(
+                  'กรุณารอพนักงานตรวจสอบยอดเงินเข้าบัญชีและกดรับออเดอร์นะคะ หน้าจอนี้จะเปลี่ยนเป็นสีเขียวทันทีที่ร้านยืนยันค่ะ',
+                  'Please wait for staff to verify your payment and accept the order. This screen turns green automatically once confirmed.'
+                )
+              : tx(`บิลนี้ได้รับ ⭐ +${starsToGrant} ดาว`, `This bill earned ⭐ +${starsToGrant} Stars`)}
           </p>
         </div>
 
-        {/* Digital & Printable Receipt Slip with Gate Exit QR */}
-        {receiptSlipEnabled && receiptData ? (
-          <ReceiptSlipCard receipt={receiptData} exitScannerEnabled={exitScannerEnabled} />
-        ) : !receiptSlipEnabled ? (
-          <div className="rounded-2xl bg-white/15 border border-white/25 px-4 py-3 text-center text-sm font-semibold text-emerald-50 flex items-center justify-center gap-2 print:hidden">
-            <PauseCircle className="w-4 h-4 shrink-0" />
-            {tx(
-              'ปิดการออกใบสลิปชั่วคราว (บันทึกยอดขายเรียบร้อยแล้ว)',
-              'Receipt slip issuance is paused (sale recorded)'
-            )}
+        {isWaitingMerchant ? (
+          <div className="rounded-3xl bg-white/15 border border-white/30 p-5 text-center space-y-2.5 print:hidden">
+            <div className="flex items-center justify-center gap-2 text-sm font-bold">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              {tx('กำลังรอหน้าร้านกดรับออเดอร์...', 'Waiting for shop confirmation...')}
+            </div>
+            <p className="text-xs text-amber-50/95">
+              {tx(
+                'ใบเสร็จรับเงินและคิวสะสมดาวจะเปิดให้อัตโนมัติหลังร้านตรวจสลิปถูกต้องแล้วเท่านั้นค่ะ',
+                'Official receipt & star points unlock only after the shop verifies your slip.'
+              )}
+            </p>
           </div>
-        ) : null}
+        ) : (
+          <>
+            {/* Digital & Printable Receipt Slip with Gate Exit QR */}
+            {receiptSlipEnabled && receiptData ? (
+              <ReceiptSlipCard receipt={receiptData} exitScannerEnabled={exitScannerEnabled} />
+            ) : !receiptSlipEnabled ? (
+              <div className="rounded-2xl bg-white/15 border border-white/25 px-4 py-3 text-center text-sm font-semibold text-emerald-50 flex items-center justify-center gap-2 print:hidden">
+                <PauseCircle className="w-4 h-4 shrink-0" />
+                {tx(
+                  'ปิดการออกใบสลิปชั่วคราว (บันทึกยอดขายเรียบร้อยแล้ว)',
+                  'Receipt slip issuance is paused (sale recorded)'
+                )}
+              </div>
+            ) : null}
 
-        {/* Loyalty / Member Card Box */}
-        <div className="rounded-3xl bg-[#FFFDF9] text-[#2F2620] p-5 sm:p-6 shadow-xl space-y-4 print:hidden">
+            {/* Loyalty / Member Card Box */}
+            <div className="rounded-3xl bg-[#FFFDF9] text-[#2F2620] p-5 sm:p-6 shadow-xl space-y-4 print:hidden">
           {!showRegisterForm && !activeMember && (
             <form onSubmit={handleSaveStars} className="space-y-3">
               <div className="flex items-center justify-between gap-2">
@@ -1404,13 +1629,19 @@ export const PaymentSuccessOverlay: React.FC<PaymentSuccessOverlayProps> = ({
             </form>
           )}
         </div>
+          </>
+        )}
 
         <button
           type="button"
           onClick={onClose}
-          className="w-full h-15 rounded-3xl bg-white text-emerald-800 font-bold text-xl shadow-lg cursor-pointer transition-transform active:scale-[0.98] print:hidden"
+          className={`w-full h-15 rounded-3xl bg-white font-bold text-xl shadow-lg cursor-pointer transition-transform active:scale-[0.98] print:hidden ${
+            isWaitingMerchant ? 'text-amber-800' : 'text-emerald-800'
+          }`}
         >
-          {tx('ปิดหน้านี้ & ขายบิลถัดไป →', 'Done & Next Bill →')}
+          {isWaitingMerchant
+            ? tx('ดูคิวอาหาร / สั่งเพิ่ม →', 'View Queue / Order More →')
+            : tx('ปิดหน้านี้ & ขายบิลถัดไป →', 'Done & Next Bill →')}
         </button>
       </div>
     </div>

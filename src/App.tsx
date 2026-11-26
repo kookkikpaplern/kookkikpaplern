@@ -51,6 +51,7 @@ import {
   CashPaymentModal,
   PaymentSuccessOverlay,
   QrPaymentModal,
+  SlipVerifyMeta,
 } from './components/PaymentModals';
 import { AdminSettingsModal, AdminSettingsTab } from './components/AdminSettingsModal';
 import { BearGuideModal } from './components/BearGuideModal';
@@ -174,8 +175,22 @@ type ViewScreen = 'welcome' | 'customer' | 'staff-auth' | 'staff-pos';
 export default function App() {
   const { lang, tx } = useLang();
 
-  // Navigation & Auth State
-  const [viewScreen, setViewScreen] = useState<ViewScreen>('welcome');
+  // Navigation & Auth State (supports ?mode=customer&table=7 for printed QR posters)
+  const [initialCustomerTable] = useState<string>(() => {
+    try {
+      return (new URLSearchParams(window.location.search).get('table') || '').trim();
+    } catch {
+      return '';
+    }
+  });
+  const [viewScreen, setViewScreen] = useState<ViewScreen>(() => {
+    try {
+      const m = new URLSearchParams(window.location.search).get('mode');
+      return m === 'customer' ? 'customer' : 'welcome';
+    } catch {
+      return 'welcome';
+    }
+  });
   const [isOrgVerified, setIsOrgVerified] = useState<boolean>(
     () => localStorage.getItem(KEYS.ORG_VERIFIED) === 'true'
   );
@@ -376,7 +391,14 @@ export default function App() {
   const [bearOutfits, setBearOutfits] = useState<BearFamilyOutfits>(() => loadBearOutfits());
 
   // POS Mode & Menu State
-  const [posMode, setPosMode] = useState<'calculator' | 'menu'>('calculator');
+  const [posMode, setPosMode] = useState<'calculator' | 'menu'>(() => {
+    try {
+      const m = new URLSearchParams(window.location.search).get('mode');
+      return m === 'customer' ? 'menu' : 'calculator';
+    } catch {
+      return 'calculator';
+    }
+  });
   const [menuItems, setMenuItems] = useState<MenuItem[]>(
     () => loadCachedMenu() || SHOP_CONFIG.menuItems
   );
@@ -461,6 +483,7 @@ export default function App() {
       dropPoint: string;
     };
     receipt?: ReceiptSlipRecord | null;
+    pendingOrderId?: string | null;
   }>({
     step: 'idle',
     amount: 0,
@@ -468,6 +491,7 @@ export default function App() {
     source: 'calculator',
     method: 'เงินสด',
     receipt: null,
+    pendingOrderId: null,
   });
 
   // Apply selected theme to document root
@@ -1024,6 +1048,37 @@ export default function App() {
     return () => window.clearInterval(timer);
   }, [scriptUrl, viewScreen, refreshOnlineOrdersNow]);
 
+  // Background 4s HTTP sync fallback with server room (handles mobile WebSocket sleep/app-switching)
+  useEffect(() => {
+    if (viewScreen !== 'staff-pos' && viewScreen !== 'customer') return;
+    let active = true;
+    const pullServerRoomState = async () => {
+      try {
+        const res = await fetch(`/api/sync/state?roomId=${encodeURIComponent(orgCode)}`);
+        if (!res.ok || !active) return;
+        const data = (await res.json()) as {
+          orders?: CustomerQueueOrder[];
+          receipts?: ReceiptSlipRecord[];
+        };
+        if (!active) return;
+        if (Array.isArray(data.orders) && data.orders.length > 0) {
+          mergeOrdersIntoState(data.orders, viewScreen === 'staff-pos');
+        }
+        if (Array.isArray(data.receipts) && data.receipts.length > 0) {
+          mergeReceiptsIntoState(data.receipts);
+        }
+      } catch {
+        // Ignore transient offline error
+      }
+    };
+    pullServerRoomState();
+    const timer = window.setInterval(pullServerRoomState, 4000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [orgCode, viewScreen, mergeOrdersIntoState, mergeReceiptsIntoState]);
+
   // Barcode scan handler with 0.8s anti-duplicate lock
   const lastBarcodeScanRef = useRef<{ code: string; time: number }>({ code: '', time: 0 });
 
@@ -1189,158 +1244,229 @@ export default function App() {
   );
 
   // Complete Payment & Send to Google Sheets (แยกแท็บ ขายจริง_หน้าร้าน / ขายจริง_ครัวแม่วัง / ทดสอบระบบ)
-  const finalizeSalePayment = useCallback(async (slipImageUrl?: string, bankAccountLabel?: string) => {
-    const cleanSlip =
-      typeof slipImageUrl === 'string' && slipImageUrl.startsWith('data:image/')
-        ? slipImageUrl
-        : undefined;
-    const cleanBank = bankAccountLabel?.trim() || '';
-    const actorUser: StaffUser = currentUser || { name: 'ลูกค้าสั่งเอง', role: 'cashier' };
-    playSuccessChime();
+  const finalizeSalePayment = useCallback(
+    async (slipImageUrl?: string, bankAccountLabel?: string, slipMeta?: SlipVerifyMeta) => {
+      const cleanSlip =
+        typeof slipImageUrl === 'string' && slipImageUrl.startsWith('data:image/')
+          ? slipImageUrl
+          : undefined;
+      const cleanBank = bankAccountLabel?.trim() || '';
+      const actorUser: StaffUser = currentUser || { name: 'ลูกค้าสั่งเอง', role: 'cashier' };
+      const isStaffOrder = Boolean(currentUser);
 
-    const activeItems = checkoutState.source === 'calculator' ? billItems : menuCart;
-    const totalAmt = checkoutState.amount;
-    const totalStars =
-      checkoutState.stars > 0
-        ? checkoutState.stars
-        : Math.max(1, Math.floor(totalAmt / 20) || 1);
+      const activeItems = checkoutState.source === 'calculator' ? billItems : menuCart;
+      const totalAmt = checkoutState.amount;
+      const totalStars =
+        checkoutState.stars > 0
+          ? checkoutState.stars
+          : Math.max(1, Math.floor(totalAmt / 20) || 1);
 
-    const itemsSummary =
-      activeItems.length > 0
-        ? activeItems
-            .map((i) => `${i.name}${i.tasteNote ? ` (${i.tasteNote})` : ''} ×${i.qty}`)
-            .join(', ')
-        : `คิดเงินรวม ฿${totalAmt}`;
+      const itemsSummary =
+        activeItems.length > 0
+          ? activeItems
+              .map((i) => `${i.name}${i.tasteNote ? ` (${i.tasteNote})` : ''} ×${i.qty}`)
+              .join(', ')
+          : `คิดเงินรวม ฿${totalAmt}`;
 
-    const isKrua = checkoutState.source === 'menu';
-    const realTabName = isKrua ? 'ขายจริง_ครัวแม่วัง' : 'ขายจริง_หน้าร้าน';
-    const sheetTab = isTestMode ? 'ทดสอบระบบ' : realTabName;
-    const modeLabel: 'ขายจริง' | 'ทดสอบระบบ' = isTestMode ? 'ทดสอบระบบ' : 'ขายจริง';
-    const billId = `B${Date.now().toString().slice(-6)}`;
-    const activeShopName = isKrua ? foodShopNameTh : shopNameTh;
+      const isKrua = checkoutState.source === 'menu';
+      const realTabName = isKrua ? 'ขายจริง_ครัวแม่วัง' : 'ขายจริง_หน้าร้าน';
+      const sheetTab = isTestMode ? 'ทดสอบระบบ' : realTabName;
+      const modeLabel: 'ขายจริง' | 'ทดสอบระบบ' = isTestMode ? 'ทดสอบระบบ' : 'ขายจริง';
+      const billId = `B${Date.now().toString().slice(-6)}`;
+      const activeShopName = isKrua ? foodShopNameTh : shopNameTh;
 
-    const cleanTable = checkoutState.deliveryInfo?.tableNumber?.trim() || '';
-    const cleanCustomerName = checkoutState.deliveryInfo?.customerName?.trim() || '';
-    const cleanDropPoint = checkoutState.deliveryInfo?.dropPoint?.trim() || '';
-    const chosenType = checkoutState.deliveryInfo?.deliveryType;
+      const cleanTable = checkoutState.deliveryInfo?.tableNumber?.trim() || '';
+      const cleanCustomerName = checkoutState.deliveryInfo?.customerName?.trim() || '';
+      const cleanDropPoint = checkoutState.deliveryInfo?.dropPoint?.trim() || '';
+      const chosenType = checkoutState.deliveryInfo?.deliveryType;
 
-    const baseDeliveryStr = chosenType
-      ? chosenType === 'ทานนี้'
-        ? `ทานนี้${cleanTable ? ` (โต๊ะที่ ${cleanTable})` : ''}${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}`
-        : chosenType === 'กลับบ้าน'
-          ? `กลับบ้าน${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}`
-          : `${chosenType}${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}${cleanDropPoint ? ` (${cleanDropPoint})` : ''}`
-      : 'หน้าร้าน';
+      const baseDeliveryStr = chosenType
+        ? chosenType === 'ทานนี้'
+          ? `ทานนี้${cleanTable ? ` (โต๊ะที่ ${cleanTable})` : ''}${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}`
+          : chosenType === 'กลับบ้าน'
+            ? `กลับบ้าน${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}`
+            : `${chosenType}${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}${cleanDropPoint ? ` (${cleanDropPoint})` : ''}`
+        : 'หน้าร้าน';
 
-    const deliveryWithBank = cleanBank
-      ? `${baseDeliveryStr} [เข้า: ${cleanBank}]`
-      : baseDeliveryStr;
+      const deliveryWithBank = cleanBank
+        ? `${baseDeliveryStr} [เข้า: ${cleanBank}]`
+        : baseDeliveryStr;
 
-    const issuedTimestamp = new Date().toLocaleString('th-TH');
-    const issuedIso = new Date().toISOString();
+      const issuedTimestamp = new Date().toLocaleString('th-TH');
+      const issuedIso = new Date().toISOString();
 
-    const issuedReceipt: ReceiptSlipRecord | null = receiptSlipEnabled
-      ? {
-          billId,
-          orgCode,
-          issuedAt: issuedIso,
-          timestamp: issuedTimestamp,
-          shopType: isKrua ? 'krua' : 'store',
-          shopName: activeShopName,
-          mode: modeLabel,
-          staffName: actorUser.name,
-          paymentMethod: checkoutState.method,
-          bankAccountLabel: cleanBank || undefined,
-          deliveryInfo: baseDeliveryStr,
-          items: activeItems.map((item) => ({ ...item })),
+      let createdOrderObj: CustomerQueueOrder | null = null;
+      if (isKrua && menuCart.length > 0) {
+        const nextQueueNo = queueOrders.length > 0 ? Math.max(...queueOrders.map((q) => q.queueNo)) + 1 : 1;
+        const resolvedDropPoint =
+          chosenType === 'ทานนี้' && cleanTable
+            ? `โต๊ะที่ ${cleanTable}`
+            : cleanDropPoint || undefined;
+        createdOrderObj = {
+          queueNo: nextQueueNo,
+          orderId: billId,
+          items: menuCart,
           totalAmount: totalAmt,
           totalStars,
+          deliveryType: chosenType || 'ทานนี้',
+          tableNumber: cleanTable || undefined,
+          paymentMethod: checkoutState.method,
+          customerName: cleanCustomerName || undefined,
+          dropPoint: resolvedDropPoint,
+          slipImageUrl: cleanSlip,
+          slipVerifyStatus: slipMeta?.verifyStatus,
+          slipDetectedAmount: slipMeta?.detectedAmount,
+          slipTransactionRef: slipMeta?.transactionRef,
+          slipVerifyNote: slipMeta?.verifyNote,
+          accepted: isStaffOrder,
+          createdAt: issuedIso,
+          status: 'กำลังทำ',
+        };
+
+        // Always push over HTTP endpoint first so duplicate slip refs are blocked & mobile WS drops never lose orders
+        try {
+          const httpRes = await fetch('/api/sync/order', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ roomId: orgCode, order: createdOrderObj }),
+          });
+          if (httpRes.status === 409) {
+            const errJson = (await httpRes.json()) as { reason?: string };
+            playScanError();
+            showToast(
+              'err',
+              errJson.reason ||
+                tx(
+                  'สลิปนี้ถูกใช้ส่งออเดอร์ไปแล้ว ไม่สามารถใช้ซ้ำได้ค่ะ',
+                  'This transfer slip was already used for another order.'
+                )
+            );
+            return;
+          }
+          if (httpRes.ok) {
+            const okJson = (await httpRes.json()) as { order?: CustomerQueueOrder };
+            if (okJson.order) createdOrderObj = okJson.order;
+          }
+        } catch {
+          // Proceed with WebSocket & Sheets queue if HTTP temporarily offline
         }
-      : null;
+      }
 
-    saveSaleHistoryLog({
-      id: billId,
-      timestamp: issuedTimestamp,
-      dateKey: getTodayDateKey(),
-      shopType: isKrua ? 'krua' : 'store',
-      shopName: activeShopName,
-      mode: modeLabel,
-      staffName: actorUser.name,
-      paymentMethod: checkoutState.method,
-      totalAmount: totalAmt,
-      totalStars,
-      itemsSummary,
-      deliveryInfo: deliveryWithBank,
-      slipImageUrl: cleanSlip,
-    });
+      if (isStaffOrder) {
+        playSuccessChime();
+      } else {
+        playSoftClick();
+      }
 
-    if (issuedReceipt) {
-      mergeReceiptsIntoState([issuedReceipt]);
-      syncBroadcastRef.current.broadcastReceiptCreated(issuedReceipt);
-    }
+      const issuedReceipt: ReceiptSlipRecord | null = receiptSlipEnabled
+        ? {
+            billId,
+            orgCode,
+            issuedAt: issuedIso,
+            timestamp: issuedTimestamp,
+            shopType: isKrua ? 'krua' : 'store',
+            shopName: activeShopName,
+            mode: modeLabel,
+            staffName: actorUser.name,
+            paymentMethod: checkoutState.method,
+            bankAccountLabel: cleanBank || undefined,
+            deliveryInfo: baseDeliveryStr,
+            items: activeItems.map((item) => ({ ...item })),
+            totalAmount: totalAmt,
+            totalStars,
+          }
+        : null;
 
-    if (isKrua && menuCart.length > 0) {
-      const nextQueueNo = queueOrders.length > 0 ? Math.max(...queueOrders.map((q) => q.queueNo)) + 1 : 1;
-      const resolvedDropPoint =
-        chosenType === 'ทานนี้' && cleanTable
-          ? `โต๊ะที่ ${cleanTable}`
-          : cleanDropPoint || undefined;
-      const newOrder: CustomerQueueOrder = {
-        queueNo: nextQueueNo,
-        orderId: billId,
-        items: menuCart,
+      saveSaleHistoryLog({
+        id: billId,
+        timestamp: issuedTimestamp,
+        dateKey: getTodayDateKey(),
+        shopType: isKrua ? 'krua' : 'store',
+        shopName: activeShopName,
+        mode: modeLabel,
+        staffName: actorUser.name,
+        paymentMethod: checkoutState.method,
         totalAmount: totalAmt,
         totalStars,
-        deliveryType: chosenType || 'ทานนี้',
-        tableNumber: cleanTable || undefined,
-        paymentMethod: checkoutState.method,
-        customerName: cleanCustomerName || undefined,
-        dropPoint: resolvedDropPoint,
+        itemsSummary,
+        deliveryInfo: deliveryWithBank,
         slipImageUrl: cleanSlip,
-        accepted: Boolean(currentUser),
-        createdAt: issuedIso,
-        status: 'กำลังทำ',
-      };
-      knownOrderIdsRef.current.add(newOrder.orderId);
-      setQueueOrders((prev) => [...prev, newOrder]);
-      syncBroadcastRef.current.broadcastOrderCreated(newOrder);
-
-      postToSheets(scriptUrl, 'ออเดอร์ออนไลน์', {
-        ...newOrder,
-        bankAccount: cleanBank,
-        slipImageUrl: cleanSlip || '',
-        slipStatus: cleanSlip ? 'แนบสลิปแล้ว' : 'ไม่มีสลิป',
       });
-    }
 
-    postToSheets(scriptUrl, sheetTab, {
-      billId,
-      mode: sheetTab,
-      shopBrand: activeShopName,
-      staffName: actorUser.name,
-      paymentMethod: checkoutState.method,
-      bankAccount: cleanBank,
-      totalAmount: totalAmt,
-      totalStars,
-      itemsSummary,
-      deliveryInfo: cleanSlip ? `${deliveryWithBank} [แนบสลิปแล้ว]` : deliveryWithBank,
-      slipStatus: cleanSlip ? 'แนบสลิปแล้ว' : 'ไม่มีสลิป',
-      slipImageUrl: cleanSlip || '',
-    });
+      if (issuedReceipt) {
+        mergeReceiptsIntoState([issuedReceipt]);
+        syncBroadcastRef.current.broadcastReceiptCreated(issuedReceipt);
+      }
 
-    if (checkoutState.source === 'calculator') {
-      setBillItems([]);
-    } else {
-      setMenuCart([]);
-    }
+      if (createdOrderObj) {
+        knownOrderIdsRef.current.add(createdOrderObj.orderId);
+        setQueueOrders((prev) => [...prev, createdOrderObj!]);
+        syncBroadcastRef.current.broadcastOrderCreated(createdOrderObj);
 
-    setCheckoutState((prev) => ({
-      ...prev,
-      step: 'success',
-      stars: totalStars,
-      receipt: issuedReceipt,
-    }));
-  }, [currentUser, checkoutState, billItems, menuCart, queueOrders, isTestMode, scriptUrl, foodShopNameTh, shopNameTh, receiptSlipEnabled, orgCode, mergeReceiptsIntoState]);
+        postToSheets(scriptUrl, 'ออเดอร์ออนไลน์', {
+          ...createdOrderObj,
+          bankAccount: cleanBank,
+          slipImageUrl: cleanSlip || '',
+          slipStatus:
+            slipMeta?.verifyStatus === 'verified'
+              ? 'AI ตรวจสลิปตรงยอด'
+              : cleanSlip
+                ? 'แนบสลิปแล้ว (รอตรวจ)'
+                : 'ส่งสลิปทาง LINE (รอตรวจ)',
+        });
+      }
+
+      postToSheets(scriptUrl, sheetTab, {
+        billId,
+        mode: sheetTab,
+        shopBrand: activeShopName,
+        staffName: actorUser.name,
+        paymentMethod: checkoutState.method,
+        bankAccount: cleanBank,
+        totalAmount: totalAmt,
+        totalStars,
+        itemsSummary,
+        deliveryInfo: cleanSlip ? `${deliveryWithBank} [แนบสลิปแล้ว]` : deliveryWithBank,
+        slipStatus:
+          slipMeta?.verifyStatus === 'verified'
+            ? 'AI ตรวจสลิปตรงยอด'
+            : cleanSlip
+              ? 'แนบสลิปแล้ว'
+              : 'ไม่มีสลิป',
+        slipImageUrl: cleanSlip || '',
+      });
+
+      if (checkoutState.source === 'calculator') {
+        setBillItems([]);
+      } else {
+        setMenuCart([]);
+      }
+
+      setCheckoutState((prev) => ({
+        ...prev,
+        step: 'success',
+        stars: totalStars,
+        receipt: issuedReceipt,
+        pendingOrderId: !isStaffOrder && createdOrderObj ? createdOrderObj.orderId : null,
+      }));
+    },
+    [
+      currentUser,
+      checkoutState,
+      billItems,
+      menuCart,
+      queueOrders,
+      isTestMode,
+      scriptUrl,
+      foodShopNameTh,
+      shopNameTh,
+      receiptSlipEnabled,
+      orgCode,
+      mergeReceiptsIntoState,
+      showToast,
+      tx,
+    ]
+  );
 
   const handleMarkReceiptExited = useCallback(
     (billId: string) => {
@@ -1385,6 +1511,11 @@ export default function App() {
         prev.map((q) => (q.orderId === orderId ? { ...q, accepted: true } : q))
       );
       syncBroadcastRef.current.broadcastOrderUpdated(orderId, { accepted: true });
+      fetch('/api/sync/order-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId: orgCode, orderId, patch: { accepted: true } }),
+      }).catch(() => {});
       if (scriptUrl && scriptUrl.trim()) {
         postToSheets(scriptUrl, 'ออเดอร์ออนไลน์', {
           actionType: 'updateOrderStatus',
@@ -1393,7 +1524,7 @@ export default function App() {
         });
       }
     },
-    [scriptUrl]
+    [scriptUrl, orgCode]
   );
 
   const handleMarkQueueDone = useCallback(
@@ -1406,6 +1537,15 @@ export default function App() {
         accepted: true,
         status: 'เสร็จแล้ว',
       });
+      fetch('/api/sync/order-update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomId: orgCode,
+          orderId,
+          patch: { accepted: true, status: 'เสร็จแล้ว' },
+        }),
+      }).catch(() => {});
       if (scriptUrl && scriptUrl.trim()) {
         postToSheets(scriptUrl, 'ออเดอร์ออนไลน์', {
           actionType: 'updateOrderStatus',
@@ -1415,7 +1555,7 @@ export default function App() {
         });
       }
     },
-    [scriptUrl]
+    [scriptUrl, orgCode]
   );
 
   // 1. WELCOME LANDING SCREEN (หน้าแรกต้อนรับลูกค้า + ป้ายโฆษณา + ถาม-ตอบด่วน)
@@ -1554,6 +1694,19 @@ export default function App() {
           </div>
         </header>
 
+        {scanToast && (
+          <div
+            className="fixed top-20 left-1/2 -translate-x-1/2 z-[70] px-5 py-3 rounded-2xl shadow-lg font-bold text-sm border max-w-[92vw] text-center"
+            style={{
+              backgroundColor: scanToast.type === 'ok' ? '#16A34A' : '#E11D48',
+              color: '#FFFFFF',
+              borderColor: 'rgba(255,255,255,0.3)',
+            }}
+          >
+            {scanToast.text}
+          </div>
+        )}
+
         <main className="max-w-7xl mx-auto px-4 sm:px-6 pt-6">
           <CustomerMenuPOS
             menuItems={menuItems}
@@ -1565,6 +1718,7 @@ export default function App() {
             foodShopNameTh={foodShopNameTh}
             foodShopNameEn={foodShopNameEn}
             isMerchantView={false}
+            initialTableNumber={initialCustomerTable}
             onAddMenuItem={(item, options) => {
               const tasteNote = options?.tasteNote?.trim() || undefined;
               const qtyToAdd = options?.qty && options.qty > 0 ? options.qty : 1;
@@ -1638,8 +1792,11 @@ export default function App() {
           outfits={bearOutfits}
           allowSlipUpload={true}
           lineShopUrl={lineShopUrl}
+          roomId={orgCode}
           onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle' }))}
-          onConfirmPaid={(slipUrl, bankLabel) => finalizeSalePayment(slipUrl, bankLabel)}
+          onConfirmPaid={(slipUrl, bankLabel, slipMeta) =>
+            finalizeSalePayment(slipUrl, bankLabel, slipMeta)
+          }
         />
 
         <PaymentSuccessOverlay
@@ -1661,7 +1818,19 @@ export default function App() {
                 checkoutState.receipt
               : null
           }
-          onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle', receipt: null }))}
+          pendingOrder={
+            checkoutState.pendingOrderId
+              ? queueOrders.find((q) => q.orderId === checkoutState.pendingOrderId) || null
+              : null
+          }
+          onClose={() =>
+            setCheckoutState((prev) => ({
+              ...prev,
+              step: 'idle',
+              receipt: null,
+              pendingOrderId: null,
+            }))
+          }
         />
       </div>
     );
@@ -2499,8 +2668,11 @@ export default function App() {
         scriptUrl={scriptUrl}
         mascotMode={checkoutState.source === 'menu' ? 'krua' : 'kids'}
         outfits={bearOutfits}
+        roomId={orgCode}
         onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle' }))}
-        onConfirmPaid={(slipUrl, bankLabel) => finalizeSalePayment(slipUrl, bankLabel)}
+        onConfirmPaid={(slipUrl, bankLabel, slipMeta) =>
+          finalizeSalePayment(slipUrl, bankLabel, slipMeta)
+        }
       />
 
       <PaymentSuccessOverlay

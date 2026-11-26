@@ -107,24 +107,32 @@ export async function compressSlipImageFile(file: File, maxDim = 640): Promise<s
         const targetH = Math.max(1, Math.round(img.height * scale));
 
         const canvas = document.createElement('canvas');
-        canvas.width = targetW;
-        canvas.height = targetH;
         const ctx = canvas.getContext('2d');
         if (!ctx) {
           reject(new Error('Canvas context unavailable'));
           return;
         }
 
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, targetW, targetH);
-        ctx.drawImage(img, 0, 0, targetW, targetH);
+        let dimScale = 1;
+        let dataUrl = '';
+        while (dimScale >= 0.5) {
+          const w = Math.max(1, Math.round(targetW * dimScale));
+          const h = Math.max(1, Math.round(targetH * dimScale));
+          canvas.width = w;
+          canvas.height = h;
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, w, h);
+          ctx.drawImage(img, 0, 0, w, h);
 
-        let quality = 0.78;
-        let dataUrl = canvas.toDataURL('image/jpeg', quality);
-        // Keep safely below Google Sheets 50k char cell limit and fast in localStorage
-        while (dataUrl.length > 42000 && quality > 0.3) {
-          quality -= 0.08;
+          let quality = 0.78;
           dataUrl = canvas.toDataURL('image/jpeg', quality);
+          // Keep safely below Google Sheets 50k char cell limit and fast in localStorage
+          while (dataUrl.length > 40000 && quality > 0.3) {
+            quality -= 0.08;
+            dataUrl = canvas.toDataURL('image/jpeg', quality);
+          }
+          if (dataUrl.length <= 40000) break;
+          dimScale -= 0.15;
         }
         resolve(dataUrl);
       };

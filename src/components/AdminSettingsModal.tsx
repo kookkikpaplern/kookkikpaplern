@@ -25,6 +25,7 @@ import {
   Wifi,
   X,
 } from 'lucide-react';
+import QRCode from 'qrcode';
 import {
   BANK_PRESETS,
   FaqItem,
@@ -243,6 +244,123 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
         m.category.toLowerCase().includes(q)
     );
   }, [menuItems, productSearch]);
+
+  // Customer Self-Order QR Poster Generator state
+  const [customerQrBaseUrl, setCustomerQrBaseUrl] = useState<string>(() => {
+    try {
+      return localStorage.getItem('kkp_customer_qr_base_url') || window.location.origin;
+    } catch {
+      return '';
+    }
+  });
+  const [customerQrTable, setCustomerQrTable] = useState<string>('');
+  const [customerQrDataUrl, setCustomerQrDataUrl] = useState<string>('');
+  const [copiedCustomerQrLink, setCopiedCustomerQrLink] = useState(false);
+
+  const customerOrderTargetUrl = useMemo(() => {
+    const base = (customerQrBaseUrl || (typeof window !== 'undefined' ? window.location.origin : ''))
+      .trim()
+      .replace(/\/+$/, '');
+    if (!base) return '';
+    const params = new URLSearchParams();
+    params.set('mode', 'customer');
+    if (customerQrTable.trim()) {
+      params.set('table', customerQrTable.trim());
+    }
+    return `${base}/?${params.toString()}`;
+  }, [customerQrBaseUrl, customerQrTable]);
+
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'general' || !customerOrderTargetUrl) return;
+    let active = true;
+    QRCode.toDataURL(customerOrderTargetUrl, {
+      width: 360,
+      margin: 2,
+      color: { dark: '#1F2937', light: '#FFFFFF' },
+    })
+      .then((url) => {
+        if (active) setCustomerQrDataUrl(url);
+      })
+      .catch(() => {
+        if (active) setCustomerQrDataUrl('');
+      });
+    return () => {
+      active = false;
+    };
+  }, [isOpen, activeTab, customerOrderTargetUrl]);
+
+  const handleDownloadCustomerQrPoster = () => {
+    if (!customerQrDataUrl) return;
+    playSoftClick();
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 800;
+      canvas.height = 1040;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      // Warm cream card background
+      ctx.fillStyle = '#FAF6F0';
+      ctx.fillRect(0, 0, 800, 1040);
+
+      // Soft outer frame
+      ctx.strokeStyle = '#5FB894';
+      ctx.lineWidth = 14;
+      ctx.strokeRect(24, 24, 752, 992);
+
+      // Top Header Banner
+      ctx.fillStyle = '#2F2620';
+      ctx.font = 'bold 42px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(`🍲 ${foodShopNameTh} · ${shopNameTh}`, 400, 105);
+
+      ctx.fillStyle = '#22664C';
+      ctx.font = 'bold 30px sans-serif';
+      ctx.fillText(
+        customerQrTable.trim()
+          ? `โต๊ะที่ ${customerQrTable.trim()} · สแกนเพื่อสั่งอาหาร & เครื่องดื่ม`
+          : 'สแกนคิวอาร์โค้ดเพื่อสั่งอาหาร & เครื่องดื่ม',
+        400,
+        162
+      );
+
+      // White QR container
+      ctx.fillStyle = '#FFFFFF';
+      ctx.fillRect(150, 210, 500, 500);
+      ctx.strokeStyle = '#CBEAD9';
+      ctx.lineWidth = 6;
+      ctx.strokeRect(150, 210, 500, 500);
+      ctx.drawImage(img, 180, 240, 440, 440);
+
+      // Footer instructions
+      ctx.fillStyle = '#1E3A8A';
+      ctx.font = 'bold 28px sans-serif';
+      ctx.fillText('รับชำระผ่านการสแกน QR เท่านั้น', 400, 790);
+
+      ctx.fillStyle = '#57534E';
+      ctx.font = '24px sans-serif';
+      ctx.fillText('รองรับทั้ง ทานนี้ · กลับบ้าน · ให้พ่อไปส่ง', 400, 840);
+      ctx.fillText('สแกนกล้องมือถือหรือแอป LINE เพื่อเปิดเมนูทันที', 400, 886);
+
+      ctx.fillStyle = '#9A8C7D';
+      ctx.font = '18px monospace';
+      const shortUrl =
+        customerOrderTargetUrl.length > 58
+          ? `${customerOrderTargetUrl.slice(0, 55)}...`
+          : customerOrderTargetUrl;
+      ctx.fillText(shortUrl, 400, 960);
+
+      const link = document.createElement('a');
+      const safeTable = customerQrTable.trim().replace(/[^a-zA-Z0-9_-]/g, '');
+      link.download = safeTable
+        ? `qr-order-table-${safeTable}.png`
+        : 'qr-order-storefront.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    };
+    img.src = customerQrDataUrl;
+  };
 
   useEffect(() => {
     if (isOpen) {
@@ -981,6 +1099,185 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                     className="w-6 h-6 accent-emerald-600 cursor-pointer"
                   />
                 </label>
+              </div>
+
+              {/* Printable Customer Ordering QR Code & Poster Generator */}
+              <div
+                className="rounded-3xl border-2 p-4 sm:p-5 space-y-4"
+                style={{
+                  backgroundColor: 'var(--bg-canvas)',
+                  borderColor: 'var(--accent-border)',
+                }}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <h3 className="text-base font-bold flex items-center gap-2" style={{ color: 'var(--text-main)' }}>
+                      <QrCode className="w-5 h-5" style={{ color: 'var(--accent-primary)' }} />
+                      {tx(
+                        'คิวอาร์โค้ดสั่งอาหารหน้าร้าน / ติดโต๊ะ (พร้อมโหลดไปปริ้น)',
+                        'Printable Customer Order QR Code & Table Poster'
+                      )}
+                    </h3>
+                    <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                      {tx(
+                        'ลูกค้าสแกนแล้วจะเข้าสู่หน้าเมนูสั่งอาหารทันที (ข้ามหน้าแอดมินและกรอกเลขโต๊ะให้อัตโนมัติ)',
+                        'Customers scan to jump straight to the ordering menu (with optional auto-filled table number)'
+                      )}
+                    </p>
+                  </div>
+                </div>
+
+                {typeof window !== 'undefined' && window.location.origin.includes('ais-dev-') && (
+                  <div
+                    className="rounded-2xl border px-3.5 py-2.5 text-xs font-medium"
+                    style={{
+                      backgroundColor: '#FEF3C7',
+                      borderColor: '#FCD34D',
+                      color: '#92400E',
+                    }}
+                  >
+                    {tx(
+                      'เคล็ดลับ: แนะนำให้ใช้ลิงก์จริงของร้าน (เช่น https://kkp-steel.vercel.app หลังอัปเดตโค้ดล่าสุดแล้ว หรือ Shared App URL https://ais-pre-...) ในช่องด้านล่างก่อนดาวน์โหลด QR เพื่อไม่ให้ลิงก์ติดสิทธิ์เครื่องพัฒนาค่ะ',
+                      'Tip: Use your live shop URL (e.g. https://kkp-steel.vercel.app after deploying latest code, or Shared App URL https://ais-pre-...) before downloading QR posters.'
+                    )}
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-5 gap-4 items-center">
+                  <div className="md:col-span-3 space-y-3">
+                    <div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                        <label className="text-xs font-bold" style={{ color: 'var(--text-main)' }}>
+                          {tx('ลิงก์เว็บของร้าน (สำหรับสร้าง QR)', 'Shop App Base URL (for QR)')}
+                        </label>
+                        <div className="flex items-center gap-3">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              playSoftClick();
+                              const vercelUrl = 'https://kkp-steel.vercel.app';
+                              setCustomerQrBaseUrl(vercelUrl);
+                              localStorage.setItem('kkp_customer_qr_base_url', vercelUrl);
+                            }}
+                            className="text-[11px] font-bold underline cursor-pointer"
+                            style={{ color: 'var(--accent-text)' }}
+                          >
+                            {tx('ใช้ kkp-steel.vercel.app', 'Use kkp-steel.vercel.app')}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              playSoftClick();
+                              const origin = window.location.origin;
+                              setCustomerQrBaseUrl(origin);
+                              localStorage.setItem('kkp_customer_qr_base_url', origin);
+                            }}
+                            className="text-[11px] font-bold underline cursor-pointer"
+                            style={{ color: 'var(--text-muted)' }}
+                          >
+                            {tx('ใช้ลิงก์ปัจจุบัน', 'Use Current URL')}
+                          </button>
+                        </div>
+                      </div>
+                      <input
+                        type="url"
+                        value={customerQrBaseUrl}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setCustomerQrBaseUrl(val);
+                          localStorage.setItem('kkp_customer_qr_base_url', val);
+                        }}
+                        placeholder="https://kkp-steel.vercel.app"
+                        className="w-full h-11 px-3.5 rounded-xl border text-xs sm:text-sm font-en focus:outline-none"
+                        style={{
+                          backgroundColor: 'var(--bg-card)',
+                          borderColor: 'var(--border-soft)',
+                          color: 'var(--text-main)',
+                        }}
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold mb-1" style={{ color: 'var(--text-main)' }}>
+                        {tx('เลขโต๊ะ (ไม่บังคับ — เว้นว่างได้สำหรับติดหน้าร้าน)', 'Table Number (Optional — leave blank for storefront)')}
+                      </label>
+                      <input
+                        type="text"
+                        value={customerQrTable}
+                        onChange={(e) => setCustomerQrTable(e.target.value)}
+                        placeholder={tx('เช่น 1, 2, 7 (ระบบจะเติมเลขโต๊ะให้อัตโนมัติ)', 'e.g. 1, 2, 7 (auto-filled on scan)')}
+                        className="w-full h-11 px-3.5 rounded-xl border text-sm font-num focus:outline-none"
+                        style={{
+                          backgroundColor: 'var(--bg-card)',
+                          borderColor: 'var(--border-soft)',
+                          color: 'var(--text-main)',
+                        }}
+                      />
+                    </div>
+
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          if (!customerOrderTargetUrl) return;
+                          playSoftClick();
+                          try {
+                            await navigator.clipboard.writeText(customerOrderTargetUrl);
+                            setCopiedCustomerQrLink(true);
+                            window.setTimeout(() => setCopiedCustomerQrLink(false), 2000);
+                          } catch {
+                            // Ignore clipboard restriction
+                          }
+                        }}
+                        className="px-3.5 py-2.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                        style={{
+                          backgroundColor: 'var(--bg-card)',
+                          borderColor: 'var(--border-soft)',
+                          color: 'var(--text-main)',
+                        }}
+                      >
+                        {copiedCustomerQrLink ? (
+                          <Check className="w-4 h-4 text-emerald-600" />
+                        ) : (
+                          <Copy className="w-4 h-4" />
+                        )}
+                        {copiedCustomerQrLink
+                          ? tx('คัดลอกลิงก์แล้ว ✓', 'Link Copied ✓')
+                          : tx('คัดลอกลิงก์สั่งอาหาร', 'Copy Order Link')}
+                      </button>
+
+                      <button
+                        type="button"
+                        disabled={!customerQrDataUrl}
+                        onClick={handleDownloadCustomerQrPoster}
+                        className="px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold text-white flex items-center gap-1.5 cursor-pointer disabled:opacity-45"
+                        style={{ backgroundColor: 'var(--accent-primary)' }}
+                      >
+                        <Download className="w-4 h-4" />
+                        {tx('ดาวน์โหลดรูป QR ไปปริ้น (PNG)', 'Download Printable QR Poster')}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="md:col-span-2 flex flex-col items-center justify-center rounded-2xl border bg-white p-3.5 text-center space-y-1.5" style={{ borderColor: 'var(--border-soft)' }}>
+                    {customerQrDataUrl ? (
+                      <img
+                        src={customerQrDataUrl}
+                        alt={tx('QR สั่งอาหารลูกค้า', 'Customer Order QR')}
+                        className="w-40 h-40 object-contain"
+                      />
+                    ) : (
+                      <div className="w-40 h-40 flex items-center justify-center text-xs text-stone-400">
+                        {tx('กำลังสร้าง QR...', 'Generating QR...')}
+                      </div>
+                    )}
+                    <p className="text-[11px] font-bold text-stone-700">
+                      {customerQrTable.trim()
+                        ? tx(`โต๊ะที่ ${customerQrTable.trim()} · พร้อมปริ้น`, `Table ${customerQrTable.trim()} · Ready to Print`)
+                        : tx('สแกนสั่งอาหารหน้าร้าน · พร้อมปริ้น', 'Storefront Order QR · Ready to Print')}
+                    </p>
+                  </div>
+                </div>
               </div>
 
               {/* Shop Names & PromptPay */}

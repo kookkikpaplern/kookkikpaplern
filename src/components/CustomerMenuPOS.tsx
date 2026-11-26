@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   Check,
   CheckCircle2,
   Coffee,
@@ -9,6 +10,7 @@ import {
   Plus,
   QrCode,
   RefreshCw,
+  ShieldCheck,
   ShoppingBag,
   Star,
   Trash2,
@@ -40,6 +42,7 @@ interface CustomerMenuPOSProps {
   foodShopNameTh: string;
   foodShopNameEn: string;
   isMerchantView?: boolean;
+  initialTableNumber?: string;
   onAddMenuItem: (item: MenuItem, options?: { qty?: number; tasteNote?: string }) => void;
   onChangeQty: (itemId: string, delta: number) => void;
   onClearCart: () => void;
@@ -82,6 +85,7 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
   foodShopNameTh,
   foodShopNameEn,
   isMerchantView = false,
+  initialTableNumber = '',
   onAddMenuItem,
   onChangeQty,
   onClearCart,
@@ -95,7 +99,7 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
   const [mainGroup, setMainGroup] = useState<'food' | 'drink'>('food');
   const [subCategory, setSubCategory] = useState('ทั้งหมด');
   const [deliveryType, setDeliveryType] = useState<'ทานนี้' | 'กลับบ้าน' | 'ให้พ่อไปส่ง'>('ทานนี้');
-  const [tableNumber, setTableNumber] = useState('');
+  const [tableNumber, setTableNumber] = useState(() => initialTableNumber.trim());
   const [customerName, setCustomerName] = useState('');
   const [dropPoint, setDropPoint] = useState('');
   const [orderFormError, setOrderFormError] = useState('');
@@ -851,17 +855,36 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                           </span>
                         </div>
 
-                        {/* Status Badges: Slip Attached + Acceptance */}
+                        {/* Status Badges: Slip Verification + Acceptance */}
                         <div className="flex flex-wrap items-center gap-1.5 mt-1">
-                          {q.slipImageUrl && (
+                          {q.slipVerifyStatus === 'verified' ? (
                             <span
                               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
                               style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
                             >
-                              <CheckCircle2 className="w-3 h-3" />
-                              {tx('แนบสลิปแล้ว', 'Slip Attached')}
+                              <ShieldCheck className="w-3 h-3" />
+                              {tx(
+                                `AI ตรวจสลิปตรงยอด ฿${(q.slipDetectedAmount || q.totalAmount).toLocaleString('th-TH')}`,
+                                `AI Matched ฿${(q.slipDetectedAmount || q.totalAmount).toLocaleString('en-US')}`
+                              )}
                             </span>
-                          )}
+                          ) : q.slipImageUrl ? (
+                            <span
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                              style={{ backgroundColor: '#FEF3C7', color: '#92400E' }}
+                            >
+                              <AlertTriangle className="w-3 h-3" />
+                              {tx('แนบสลิปแล้ว (รอร้านตรวจยอด)', 'Slip Attached (Verify Manually)')}
+                            </span>
+                          ) : q.slipVerifyStatus === 'manual_line' ? (
+                            <span
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                              style={{ backgroundColor: '#FEF3C7', color: '#92400E' }}
+                            >
+                              <AlertTriangle className="w-3 h-3" />
+                              {tx('ส่งสลิปทาง LINE (ตรวจก่อนรับ)', 'LINE Slip (Verify First)')}
+                            </span>
+                          ) : null}
                           {q.accepted ? (
                             <span
                               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
@@ -1216,18 +1239,34 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
               className="p-4 border-t space-y-2.5 shrink-0"
               style={{ borderColor: 'var(--border-soft)', backgroundColor: 'var(--bg-canvas)' }}
             >
-              <div className="flex items-center justify-between text-xs">
+              <div className="flex items-center justify-between gap-2 text-xs">
                 <span style={{ color: 'var(--text-muted)' }}>
                   {previewOrder.customerName || translateDeliveryType(previewOrder.deliveryType, lang)}
                   {previewOrder.dropPoint ? ` (${previewOrder.dropPoint})` : ''}
                 </span>
-                <span
-                  className="px-2 py-0.5 rounded-lg font-bold"
-                  style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
-                >
-                  {tx('แนบสลิปแล้ว', 'Slip Attached')}
-                </span>
+                {previewOrder.slipVerifyStatus === 'verified' ? (
+                  <span
+                    className="px-2 py-0.5 rounded-lg font-bold inline-flex items-center gap-1"
+                    style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
+                  >
+                    <ShieldCheck className="w-3 h-3" />
+                    {tx('AI ตรวจสลิปตรงยอด', 'AI Matched')}
+                  </span>
+                ) : (
+                  <span
+                    className="px-2 py-0.5 rounded-lg font-bold inline-flex items-center gap-1"
+                    style={{ backgroundColor: '#FEF3C7', color: '#92400E' }}
+                  >
+                    <AlertTriangle className="w-3 h-3" />
+                    {tx('โปรดตรวจยอดเงินเข้าบัญชีก่อนรับ', 'Verify Bank Balance First')}
+                  </span>
+                )}
               </div>
+              {previewOrder.slipVerifyNote && (
+                <p className="text-[11px] font-medium" style={{ color: 'var(--text-muted)' }}>
+                  {previewOrder.slipVerifyNote}
+                </p>
+              )}
 
               {isMerchantView && !previewOrder.accepted && onAcceptQueueOrder ? (
                 <div className="grid grid-cols-3 gap-2">

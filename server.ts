@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -124,9 +125,241 @@ async function generateWithRetryAndFallback(params: {
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '4mb' }));
+
+  interface SyncClient {
+    clientId: string;
+    role: 'staff' | 'customer';
+    ws: WebSocket;
+  }
+
+  interface SyncRoomState {
+    clients: Map<string, SyncClient>;
+    orders: Map<string, Record<string, unknown>>;
+    receipts: Map<string, Record<string, unknown>>;
+    sharedConfig: {
+      settings?: Record<string, string>;
+      menu?: unknown[];
+      faqs?: unknown[];
+      rewardOffers?: unknown[];
+      updatedAt?: number;
+    };
+  }
+
+  const syncRooms = new Map<string, SyncRoomState>();
+  const SYNC_PERSIST_PATH = '/tmp/kkp-pos-sync-rooms.json';
+  let persistTimer: NodeJS.Timeout | null = null;
+
+  const schedulePersistRooms = () => {
+    if (persistTimer) return;
+    persistTimer = setTimeout(() => {
+      persistTimer = null;
+      try {
+        const serialized: Record<
+          string,
+          {
+            orders: Array<Record<string, unknown>>;
+            receipts: Array<Record<string, unknown>>;
+            sharedConfig: SyncRoomState['sharedConfig'];
+          }
+        > = {};
+        for (const [roomId, room] of syncRooms.entries()) {
+          serialized[roomId] = {
+            orders: Array.from(room.orders.values()).slice(-120),
+            receipts: Array.from(room.receipts.values()).slice(-200),
+            sharedConfig: room.sharedConfig,
+          };
+        }
+        fs.writeFileSync(SYNC_PERSIST_PATH, JSON.stringify(serialized), 'utf8');
+      } catch {
+        // Ignore non-fatal tmp persistence error
+      }
+    }, 350);
+  };
+
+  // Restore recent orders/receipts/config from /tmp if server restarted
+  try {
+    if (fs.existsSync(SYNC_PERSIST_PATH)) {
+      const raw = fs.readFileSync(SYNC_PERSIST_PATH, 'utf8');
+      const parsed = JSON.parse(raw) as Record<
+        string,
+        {
+          orders?: Array<Record<string, unknown>>;
+          receipts?: Array<Record<string, unknown>>;
+          sharedConfig?: SyncRoomState['sharedConfig'];
+        }
+      >;
+      for (const [roomId, saved] of Object.entries(parsed || {})) {
+        const ordersMap = new Map<string, Record<string, unknown>>();
+        for (const o of saved.orders || []) {
+          const id = String(o.orderId || '').trim();
+          if (id) ordersMap.set(id, o);
+        }
+        const receiptsMap = new Map<string, Record<string, unknown>>();
+        for (const r of saved.receipts || []) {
+          const bid = String(r.billId || '').trim().toUpperCase();
+          if (bid) receiptsMap.set(bid, r);
+        }
+        syncRooms.set(sanitizeRoomId(roomId), {
+          clients: new Map(),
+          orders: ordersMap,
+          receipts: receiptsMap,
+          sharedConfig: saved.sharedConfig || {},
+        });
+      }
+    }
+  } catch {
+    // Start fresh if cache file is unreadable
+  }
+
+  const getOrCreateSyncRoom = (roomId: string): SyncRoomState => {
+    const cleanId = sanitizeRoomId(roomId);
+    let room = syncRooms.get(cleanId);
+    if (!room) {
+      room = {
+        clients: new Map(),
+        orders: new Map(),
+        receipts: new Map(),
+        sharedConfig: {},
+      };
+      syncRooms.set(cleanId, room);
+    }
+    return room;
+  };
+
+  const broadcastSync = (room: SyncRoomState, payload: unknown, excludeClientId?: string) => {
+    const raw = JSON.stringify(payload);
+    for (const client of room.clients.values()) {
+      if (excludeClientId && client.clientId === excludeClientId) continue;
+      if (client.ws.readyState === WebSocket.OPEN) {
+        client.ws.send(raw);
+      }
+    }
+  };
+
+  const hasDuplicateSlipRef = (room: SyncRoomState, txRef: string, currentOrderId?: string): boolean => {
+    const cleanRef = txRef.trim().toUpperCase();
+    if (!cleanRef || cleanRef.length < 4) return false;
+    for (const existing of room.orders.values()) {
+      const existingRef = String(existing.slipTransactionRef || '').trim().toUpperCase();
+      const existingOrderId = String(existing.orderId || '').trim();
+      if (existingRef && existingRef === cleanRef && (!currentOrderId || existingOrderId !== currentOrderId)) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const upsertRoomOrder = (
+    roomId: string,
+    rawOrder: Record<string, unknown>
+  ): { ok: true; order: Record<string, unknown>; duplicateSlip?: false } | { ok: false; duplicateSlip: true; reason: string } => {
+    const cleanRoomId = sanitizeRoomId(roomId);
+    const room = getOrCreateSyncRoom(cleanRoomId);
+    const orderId = String(rawOrder.orderId || '').trim();
+    if (!orderId) {
+      return { ok: false, duplicateSlip: true, reason: 'Missing orderId' };
+    }
+
+    const txRef = String(rawOrder.slipTransactionRef || '').trim();
+    if (txRef && hasDuplicateSlipRef(room, txRef, orderId)) {
+      return {
+        ok: false,
+        duplicateSlip: true,
+        reason: `สลิปเลขอ้างอิง ${txRef} ถูกใช้ส่งออเดอร์ไปแล้ว ไม่สามารถใช้ซ้ำได้ค่ะ`,
+      };
+    }
+
+    const existing = room.orders.get(orderId);
+    if (existing) {
+      return { ok: true, order: existing };
+    }
+
+    const existingNos = Array.from(room.orders.values()).map((o) => Number(o.queueNo || 0));
+    const maxNo = existingNos.length > 0 ? Math.max(...existingNos) : 0;
+    const requestedNo = Number(rawOrder.queueNo || 0);
+    const resolvedQueueNo =
+      requestedNo > 0 && !existingNos.includes(requestedNo) ? requestedNo : maxNo + 1;
+
+    const storedOrder: Record<string, unknown> = {
+      ...rawOrder,
+      orderId,
+      queueNo: resolvedQueueNo,
+    };
+    room.orders.set(orderId, storedOrder);
+    if (room.orders.size > 150) {
+      const firstKey = room.orders.keys().next().value;
+      if (firstKey) room.orders.delete(firstKey);
+    }
+    schedulePersistRooms();
+    return { ok: true, order: storedOrder };
+  };
 
   app.get('/api/health', (_req, res) => {
+    res.json({ ok: true });
+  });
+
+  app.get('/api/sync/state', (req, res) => {
+    const roomId = sanitizeRoomId(req.query.roomId);
+    const room = getOrCreateSyncRoom(roomId);
+    res.json({
+      roomId,
+      orders: Array.from(room.orders.values()),
+      receipts: Array.from(room.receipts.values()),
+      sharedConfig: room.sharedConfig,
+    });
+  });
+
+  app.post('/api/sync/order', (req, res) => {
+    const { roomId, order } = req.body as {
+      roomId?: string;
+      order?: Record<string, unknown>;
+    };
+    if (!order || typeof order !== 'object') {
+      res.status(400).json({ ok: false, reason: 'Invalid order payload' });
+      return;
+    }
+    const cleanRoomId = sanitizeRoomId(roomId);
+    const result = upsertRoomOrder(cleanRoomId, order);
+    if (!result.ok) {
+      res.status(409).json(result);
+      return;
+    }
+    const room = getOrCreateSyncRoom(cleanRoomId);
+    broadcastSync(room, {
+      type: 'sync:order-created',
+      roomId: cleanRoomId,
+      fromClientId: 'http_api',
+      order: result.order,
+    });
+    res.json({ ok: true, order: result.order });
+  });
+
+  app.post('/api/sync/order-update', (req, res) => {
+    const { roomId, orderId, patch } = req.body as {
+      roomId?: string;
+      orderId?: string;
+      patch?: Record<string, unknown>;
+    };
+    const cleanOrderId = String(orderId || '').trim();
+    if (!cleanOrderId || !patch || typeof patch !== 'object') {
+      res.status(400).json({ ok: false });
+      return;
+    }
+    const cleanRoomId = sanitizeRoomId(roomId);
+    const room = getOrCreateSyncRoom(cleanRoomId);
+    const existing = room.orders.get(cleanOrderId);
+    if (existing) {
+      room.orders.set(cleanOrderId, { ...existing, ...patch });
+      schedulePersistRooms();
+    }
+    broadcastSync(room, {
+      type: 'sync:order-updated',
+      roomId: cleanRoomId,
+      fromClientId: 'http_api',
+      orderId: cleanOrderId,
+      patch,
+    });
     res.json({ ok: true });
   });
 
@@ -290,6 +523,242 @@ Respond strictly using the JSON schema. Return reasonTh in polite Thai explainin
     }
   });
 
+  app.post('/api/verify-slip', async (req, res) => {
+    const {
+      slipImageUrl,
+      expectedAmount,
+      expectedAccountName = '',
+      expectedPromptPayId = '',
+      roomId = 'KKP2027',
+      lang = 'th',
+    } = req.body as {
+      slipImageUrl?: string;
+      expectedAmount?: number;
+      expectedAccountName?: string;
+      expectedPromptPayId?: string;
+      roomId?: string;
+      lang?: 'th' | 'en';
+    };
+
+    try {
+      if (!slipImageUrl || typeof slipImageUrl !== 'string') {
+        res.json({
+          verified: false,
+          status: 'rejected',
+          reason:
+            lang === 'en'
+              ? 'Please attach a transfer slip image first.'
+              : 'กรุณาแนบรูปสลิปโอนเงินก่อนนะคะ',
+        });
+        return;
+      }
+
+      const match = slipImageUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/);
+      if (!match) {
+        res.json({
+          verified: false,
+          status: 'rejected',
+          reason:
+            lang === 'en'
+              ? 'Invalid slip image format.'
+              : 'รูปแบบไฟล์รูปสลิปไม่ถูกต้อง กรุณาเลือกไฟล์ JPG หรือ PNG ค่ะ',
+        });
+        return;
+      }
+
+      const targetAmount = Number(expectedAmount || 0);
+      if (!Number.isFinite(targetAmount) || targetAmount <= 0) {
+        res.json({
+          verified: false,
+          status: 'rejected',
+          reason: lang === 'en' ? 'Invalid order amount.' : 'ยอดสั่งซื้อไม่ถูกต้องค่ะ',
+        });
+        return;
+      }
+
+      if (!process.env.GEMINI_API_KEY) {
+        res.json({
+          verified: false,
+          status: 'unverified_ai_error',
+          reason:
+            lang === 'en'
+              ? 'Auto slip check is temporarily unavailable. Order will require manual shop verification.'
+              : 'ระบบตรวจสลิปอัตโนมัติยังไม่พร้อมใช้งานชั่วคราว ส่งสลิปให้ร้านตรวจสอบด้วยตนเองได้ค่ะ',
+        });
+        return;
+      }
+
+      const [, mimeType, base64Data] = match;
+      const cleanLast4 = String(expectedPromptPayId || '').replace(/\D/g, '').slice(-4);
+
+      const response = await generateWithRetryAndFallback({
+        contents: {
+          parts: [
+            {
+              inlineData: {
+                mimeType,
+                data: base64Data,
+              },
+            },
+            {
+              text: `You are a strict Thai payment transfer slip auditor.
+Inspect this uploaded image carefully for an expected payment of ${targetAmount.toFixed(2)} THB.
+Expected recipient account name: "${String(expectedAccountName || '').slice(0, 80)}"
+Expected recipient account/PromptPay trailing digits: "${cleanLast4}"
+
+Check carefully:
+1. isBankSlip: True ONLY if this image is a genuine Thai bank transfer slip, PromptPay slip, or e-Wallet (TrueMoney/LinePay) transfer confirmation receipt showing a completed transfer amount. False if it is a product photo, selfie, meme, blank image, shopping cart screenshot, QR payment screen BEFORE transferring, or edited/unreadable image.
+2. detectedAmount: Extract the exact numeric transfer amount in THB (e.g. 65 or 65.50). Do NOT confuse fees (ค่าธรรมเนียม 0.00) with the main transfer amount! Return 0 if unreadable.
+3. recipientName: Read the recipient name on the slip (if shown), else "".
+4. recipientAccount: Read the masked/visible recipient account or PromptPay number on the slip (if shown), else "".
+5. recipientMatchesExpected: Compare the slip recipient against expected name "${String(expectedAccountName || '')}" or trailing digits "${cleanLast4}" (allow Thai/English transliteration or partial masking like "คำวัง พ." / "KHAMWANG" / "xxx-x-x${cleanLast4}"). Return "mismatch" ONLY if a clearly different recipient name or clearly different trailing digits are shown; return "match" if name or trailing digits align; return "unclear" if masked/cropped/merchant QR without readable details.
+6. transactionRef: Extract the transaction reference / Ref ID / รหัสอ้างอิง on the slip cleanly (digits/alphanumeric, no spaces), else "".
+7. transferDate: Read date & time on slip if visible, else "".
+8. reasonTh & reasonEn: Short polite explanation.
+
+Respond strictly as JSON following the schema.`,
+            },
+          ],
+        },
+        config: {
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              isBankSlip: { type: Type.BOOLEAN },
+              detectedAmount: { type: Type.NUMBER },
+              recipientName: { type: Type.STRING },
+              recipientAccount: { type: Type.STRING },
+              recipientMatchesExpected: { type: Type.STRING },
+              transactionRef: { type: Type.STRING },
+              transferDate: { type: Type.STRING },
+              reasonTh: { type: Type.STRING },
+              reasonEn: { type: Type.STRING },
+            },
+            required: [
+              'isBankSlip',
+              'detectedAmount',
+              'recipientName',
+              'recipientAccount',
+              'recipientMatchesExpected',
+              'transactionRef',
+              'transferDate',
+              'reasonTh',
+              'reasonEn',
+            ],
+          },
+        },
+      });
+
+      const parsed = JSON.parse((response.text || '{}').trim()) as {
+        isBankSlip?: boolean;
+        detectedAmount?: number;
+        recipientName?: string;
+        recipientAccount?: string;
+        recipientMatchesExpected?: string;
+        transactionRef?: string;
+        transferDate?: string;
+        reasonTh?: string;
+        reasonEn?: string;
+      };
+
+      if (parsed.isBankSlip !== true) {
+        res.json({
+          verified: false,
+          status: 'rejected',
+          detectedAmount: 0,
+          reason:
+            lang === 'en'
+              ? parsed.reasonEn || 'This image is not a valid bank transfer slip.'
+              : parsed.reasonTh || 'รูปภาพที่แนบไม่ใช่สลิปโอนเงินที่ถูกต้องค่ะ กรุณาแนบสลิปการโอนเงินจริงนะคะ',
+        });
+        return;
+      }
+
+      const detected = Number(parsed.detectedAmount || 0);
+      if (!Number.isFinite(detected) || detected <= 0) {
+        res.json({
+          verified: false,
+          status: 'rejected',
+          detectedAmount: 0,
+          reason:
+            lang === 'en'
+              ? 'Could not read the transfer amount clearly on the slip. Please upload a clearer slip.'
+              : 'ไม่สามารถอ่านตัวเลขยอดเงินในสลิปได้ชัดเจน กรุณาแนบรูปสลิปที่เห็นยอดเงินชัดๆ นะคะ',
+        });
+        return;
+      }
+
+      if (Math.abs(detected - targetAmount) > 0.01) {
+        res.json({
+          verified: false,
+          status: 'rejected',
+          detectedAmount: detected,
+          reason:
+            lang === 'en'
+              ? `Slip amount (฿${detected.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) does not match order total (฿${targetAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}).`
+              : `ยอดเงินในสลิป (฿${detected.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) ไม่ตรงกับยอดที่ต้องชำระ (฿${targetAmount.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}) จึงไม่สามารถส่งออเดอร์ได้ค่ะ`,
+        });
+        return;
+      }
+
+      const recipientMatch = String(parsed.recipientMatchesExpected || 'unclear').toLowerCase();
+      if (recipientMatch === 'mismatch') {
+        res.json({
+          verified: false,
+          status: 'rejected',
+          detectedAmount: detected,
+          reason:
+            lang === 'en'
+              ? `Recipient on slip (${parsed.recipientName || parsed.recipientAccount || 'unknown'}) does not match the shop account.`
+              : `บัญชีผู้รับในสลิป (${parsed.recipientName || parsed.recipientAccount || 'ไม่ตรงกัน'}) ไม่ตรงกับบัญชีของร้าน กรุณาตรวจสอบสลิปอีกครั้งนะคะ`,
+        });
+        return;
+      }
+
+      const cleanTxRef = String(parsed.transactionRef || '').trim();
+      const room = getOrCreateSyncRoom(sanitizeRoomId(roomId));
+      if (cleanTxRef && hasDuplicateSlipRef(room, cleanTxRef)) {
+        res.json({
+          verified: false,
+          status: 'rejected',
+          detectedAmount: detected,
+          transactionRef: cleanTxRef,
+          reason:
+            lang === 'en'
+              ? `This transfer slip (Ref: ${cleanTxRef}) has already been used for another order.`
+              : `สลิปโอนเงินรายการนี้ (อ้างอิง ${cleanTxRef}) ถูกใช้ส่งออเดอร์ไปแล้ว ไม่สามารถใช้ซ้ำได้ค่ะ`,
+        });
+        return;
+      }
+
+      res.json({
+        verified: true,
+        status: 'verified',
+        detectedAmount: detected,
+        recipientName: parsed.recipientName || '',
+        recipientAccount: parsed.recipientAccount || '',
+        transactionRef: cleanTxRef,
+        transferDate: parsed.transferDate || '',
+        reason:
+          lang === 'en'
+            ? `Verified ฿${detected.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} slip.`
+            : `ตรวจพบสลิปยอด ฿${detected.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ตรงตามรายการ (รอร้านตรวจยอดเข้าอีกครั้งค่ะ)`,
+      });
+    } catch (err) {
+      console.error('Slip verification error:', err);
+      res.json({
+        verified: false,
+        status: 'unverified_ai_error',
+        reason:
+          lang === 'en'
+            ? 'Auto slip check is temporarily unavailable. Order will be marked for manual shop check.'
+            : 'ระบบตรวจสลิปอัตโนมัติไม่ว่างชั่วคราว สามารถส่งสลิปให้ร้านตรวจสอบด้วยตนเองได้ค่ะ',
+      });
+    }
+  });
+
   if (process.env.NODE_ENV === 'production') {
     const distDir = path.resolve(__dirname, 'dist');
     app.use(express.static(distDir));
@@ -303,51 +772,6 @@ Respond strictly using the JSON schema. Return reasonTh in polite Thai explainin
     });
     app.use(vite.middlewares);
   }
-
-  interface SyncClient {
-    clientId: string;
-    role: 'staff' | 'customer';
-    ws: WebSocket;
-  }
-
-  interface SyncRoomState {
-    clients: Map<string, SyncClient>;
-    orders: Map<string, Record<string, unknown>>;
-    receipts: Map<string, Record<string, unknown>>;
-    sharedConfig: {
-      settings?: Record<string, string>;
-      menu?: unknown[];
-      faqs?: unknown[];
-      rewardOffers?: unknown[];
-      updatedAt?: number;
-    };
-  }
-
-  const syncRooms = new Map<string, SyncRoomState>();
-
-  const getOrCreateSyncRoom = (roomId: string): SyncRoomState => {
-    let room = syncRooms.get(roomId);
-    if (!room) {
-      room = {
-        clients: new Map(),
-        orders: new Map(),
-        receipts: new Map(),
-        sharedConfig: {},
-      };
-      syncRooms.set(roomId, room);
-    }
-    return room;
-  };
-
-  const broadcastSync = (room: SyncRoomState, payload: unknown, excludeClientId?: string) => {
-    const raw = JSON.stringify(payload);
-    for (const client of room.clients.values()) {
-      if (excludeClientId && client.clientId === excludeClientId) continue;
-      if (client.ws.readyState === WebSocket.OPEN) {
-        client.ws.send(raw);
-      }
-    }
-  };
 
   const httpServer = http.createServer(app);
   const wssCall = new WebSocketServer({ noServer: true });
@@ -433,34 +857,14 @@ Respond strictly using the JSON schema. Return reasonTh in polite Thai explainin
         const room = getOrCreateSyncRoom(joinedRoomId);
 
         if (msg.type === 'sync:order-create' && msg.order && typeof msg.order === 'object') {
-          const orderId = String(msg.order.orderId || '').trim();
-          if (!orderId) return;
-          if (room.orders.has(orderId)) return; // Idempotent guard
-
-          // Keep queueNo unique across concurrent devices
-          const existingNos = Array.from(room.orders.values()).map((o) => Number(o.queueNo || 0));
-          const maxNo = existingNos.length > 0 ? Math.max(...existingNos) : 0;
-          const requestedNo = Number(msg.order.queueNo || 0);
-          const resolvedQueueNo =
-            requestedNo > 0 && !existingNos.includes(requestedNo) ? requestedNo : maxNo + 1;
-
-          const storedOrder: Record<string, unknown> = {
-            ...msg.order,
-            orderId,
-            queueNo: resolvedQueueNo,
-          };
-          room.orders.set(orderId, storedOrder);
-          // Trim very old completed orders if > 150
-          if (room.orders.size > 150) {
-            const firstKey = room.orders.keys().next().value;
-            if (firstKey) room.orders.delete(firstKey);
-          }
+          const result = upsertRoomOrder(joinedRoomId, msg.order);
+          if (!result.ok) return;
 
           broadcastSync(room, {
             type: 'sync:order-created',
             roomId: joinedRoomId,
             fromClientId: joinedClientId,
-            order: storedOrder,
+            order: result.order,
           });
           return;
         }
@@ -471,6 +875,7 @@ Respond strictly using the JSON schema. Return reasonTh in polite Thai explainin
           if (existing) {
             const updated = { ...existing, ...msg.patch };
             room.orders.set(orderId, updated);
+            schedulePersistRooms();
           }
           broadcastSync(
             room,
@@ -503,6 +908,7 @@ Respond strictly using the JSON schema. Return reasonTh in polite Thai explainin
             room.sharedConfig.rewardOffers = msg.rewardOffers;
           }
           room.sharedConfig.updatedAt = Date.now();
+          schedulePersistRooms();
 
           broadcastSync(
             room,
@@ -532,6 +938,7 @@ Respond strictly using the JSON schema. Return reasonTh in polite Thai explainin
             const firstKey = room.receipts.keys().next().value;
             if (firstKey) room.receipts.delete(firstKey);
           }
+          schedulePersistRooms();
           broadcastSync(
             room,
             {
@@ -556,6 +963,7 @@ Respond strictly using the JSON schema. Return reasonTh in polite Thai explainin
               exitedAt,
               exitedBy,
             });
+            schedulePersistRooms();
           }
           broadcastSync(room, {
             type: 'sync:receipt-updated',
