@@ -61,6 +61,10 @@ import {
   ParsedExcelProductsResult,
   parseProductsFromExcelFile,
 } from '../utils/excelProducts';
+import {
+  decodeQrCodeFromFile,
+  extractLineOaId,
+} from '../utils/lineOrder';
 import { playSoftClick } from '../utils/sound';
 
 export type AdminSettingsTab = 'general' | 'products' | 'faq' | 'summary' | 'sheets';
@@ -91,6 +95,8 @@ interface AdminSettingsModalProps {
   onSelectActivePaymentAccount: (id: string) => void;
   lineShopUrl: string;
   onChangeLineShopUrl: (val: string) => void;
+  lineQrImageUrl: string;
+  onChangeLineQrImageUrl: (val: string) => void;
   scriptUrl: string;
   onChangeScriptUrl: (val: string) => void;
   rewardNotice: string;
@@ -151,6 +157,8 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   onSelectActivePaymentAccount,
   lineShopUrl,
   onChangeLineShopUrl,
+  lineQrImageUrl,
+  onChangeLineQrImageUrl,
   scriptUrl,
   onChangeScriptUrl,
   rewardNotice,
@@ -208,6 +216,9 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   const [bankPromptPayInput, setBankPromptPayInput] = useState('');
   const [bankQrImageInput, setBankQrImageInput] = useState('');
   const bankQrInputRef = useRef<HTMLInputElement>(null);
+  const lineQrInputRef = useRef<HTMLInputElement>(null);
+  const [lineQrFeedback, setLineQrFeedback] = useState('');
+  const [isReadingLineQr, setIsReadingLineQr] = useState(false);
 
   // Add FAQ state
   const [newQuestion, setNewQuestion] = useState('');
@@ -821,6 +832,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
           ),
           activePaymentAccountId,
           lineShopUrl,
+          lineQrImageUrl,
           rewardNotice,
           promoTitle,
           promoSubtitle,
@@ -879,6 +891,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
         ),
         activePaymentAccountId,
         lineShopUrl,
+        lineQrImageUrl,
         rewardNotice,
         promoTitle,
         promoSubtitle,
@@ -1836,25 +1849,162 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                   )}
                 </div>
 
-                <div>
-                  <label className="block text-sm font-semibold mb-1">
-                    {tx(
-                      'ลิงก์ LINE ร้าน / LINE OA (สำหรับลูกค้ากดส่งสลิปในหน้าสั่งอาหารเอง)',
-                      'Shop LINE / LINE OA Link (for customer slip sending)'
-                    )}
-                  </label>
+                <div className="space-y-3 rounded-2xl border p-4" style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}>
+                  <div>
+                    <label className="block text-sm font-semibold mb-1">
+                      {tx(
+                        'ลิงก์ LINE ร้าน / รูปคิวอาร์โค้ด LINE (ให้ลูกค้าส่งเมนูอาหารเข้า LINE)',
+                        'Shop LINE Link or LINE QR Code (for receiving food orders)'
+                      )}
+                    </label>
+                    <input
+                      type="url"
+                      value={lineShopUrl}
+                      onChange={(e) => onChangeLineShopUrl(e.target.value)}
+                      placeholder="https://line.me/R/ti/p/@yourshop"
+                      className="w-full h-11 px-3.5 rounded-2xl border text-sm font-mono"
+                      style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                    />
+                  </div>
+
+                  {/* อัปโหลดรูป QR Code LINE ที่พี่สาวหรือร้านส่งมาให้ */}
                   <input
-                    type="url"
-                    value={lineShopUrl}
-                    onChange={(e) => onChangeLineShopUrl(e.target.value)}
-                    placeholder="https://line.me/ti/p/..."
-                    className="w-full h-11 px-3.5 rounded-2xl border text-sm font-mono"
-                    style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                    ref={lineQrInputRef}
+                    type="file"
+                    accept="image/*"
+                    className="hidden"
+                    onChange={async (e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (!file) return;
+                      playSoftClick();
+                      setIsReadingLineQr(true);
+                      setLineQrFeedback('');
+                      try {
+                        const [compressed, decoded] = await Promise.all([
+                          compressProductImageFile(file, 420),
+                          decodeQrCodeFromFile(file),
+                        ]);
+                        onChangeLineQrImageUrl(compressed);
+                        if (decoded) {
+                          onChangeLineShopUrl(decoded);
+                          const oaId = extractLineOaId(decoded);
+                          setLineQrFeedback(
+                            oaId
+                              ? tx(
+                                  `อ่านลิงก์ LINE OA (${oaId}) จากคิวอาร์โค้ดเรียบร้อยแล้วค่ะ ✓ กดส่งเมนูเข้าแชทร้านได้ทันที`,
+                                  `Decoded LINE OA (${oaId}) from QR code! Direct order messages enabled ✓`
+                                )
+                              : tx(
+                                  'อ่านลิงก์ LINE จากรูปคิวอาร์โค้ดเรียบร้อย ✓ และบันทึกรูป QR ไว้ให้ลูกค้าสแกนเพิ่มเพื่อนด้วยค่ะ',
+                                  'Decoded LINE link & saved QR picture for customers to scan ✓'
+                                )
+                          );
+                        } else {
+                          setLineQrFeedback(
+                            tx(
+                              'บันทึกรูปคิวอาร์โค้ด LINE ร้านเรียบร้อยแล้วค่ะ ✓ ลูกค้าสามารถกดดู QR เพิ่มเพื่อนหน้าเมนูได้ทันที',
+                              'Saved LINE QR picture! Customers can view & scan it right from the menu ✓'
+                            )
+                          );
+                        }
+                      } catch {
+                        setLineQrFeedback(
+                          tx(
+                            'ไม่สามารถอ่านไฟล์รูปได้ กรุณาลองเลือกรูปคิวอาร์โค้ดใหม่อีกครั้งนะคะ',
+                            'Could not load image file. Please try another QR photo.'
+                          )
+                        );
+                      } finally {
+                        setIsReadingLineQr(false);
+                      }
+                    }}
                   />
-                  <p className="text-[11px] mt-1" style={{ color: 'var(--text-muted)' }}>
+
+                  <div
+                    className="rounded-2xl border border-dashed p-3 flex flex-wrap items-center justify-between gap-3"
+                    style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--accent-border)' }}
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      {lineQrImageUrl ? (
+                        <img
+                          src={lineQrImageUrl}
+                          alt={tx('รูปคิวอาร์โค้ด LINE ร้าน', 'Shop LINE QR')}
+                          className="w-14 h-14 rounded-xl object-contain border bg-white p-0.5 shrink-0"
+                          style={{ borderColor: 'var(--border-soft)' }}
+                        />
+                      ) : (
+                        <div
+                          className="w-14 h-14 rounded-xl border border-dashed flex items-center justify-center shrink-0"
+                          style={{ borderColor: 'var(--border-soft)', color: '#16A34A', backgroundColor: '#DCFCE7' }}
+                        >
+                          <QrCode className="w-6 h-6" />
+                        </div>
+                      )}
+                      <div className="min-w-0">
+                        <p className="text-xs font-bold" style={{ color: 'var(--text-main)' }}>
+                          {tx(
+                            'มีแต่รูปคิวอาร์โค้ด LINE? อัปโหลดตรงนี้ได้เลยค่ะ',
+                            'Only have a LINE QR screenshot? Upload it here'
+                          )}
+                        </p>
+                        <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                          {tx(
+                            'ระบบจะอ่านลิงก์ LINE จากรูปให้เอง และเก็บภาพ QR ไว้ให้ลูกค้าสแกนเพิ่มเพื่อนด้วยค่ะ',
+                            'Auto-reads the LINE URL from the QR and shows it for customers to scan'
+                          )}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        disabled={isReadingLineQr}
+                        onClick={() => {
+                          playSoftClick();
+                          lineQrInputRef.current?.click();
+                        }}
+                        className="px-3.5 h-10 rounded-xl font-bold text-xs text-white flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                        style={{ backgroundColor: '#16A34A' }}
+                      >
+                        <ImagePlus className="w-4 h-4" />
+                        {isReadingLineQr
+                          ? tx('กำลังอ่าน QR...', 'Reading QR...')
+                          : lineQrImageUrl
+                            ? tx('เปลี่ยนรูป QR LINE', 'Change LINE QR')
+                            : tx('อัปโหลดรูป QR LINE', 'Upload LINE QR')}
+                      </button>
+                      {lineQrImageUrl && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playSoftClick();
+                            onChangeLineQrImageUrl('');
+                            setLineQrFeedback('');
+                          }}
+                          className="px-2.5 h-10 rounded-xl text-xs font-bold cursor-pointer"
+                          style={{ backgroundColor: 'var(--pastel-pink)', color: 'var(--pastel-pink-text)' }}
+                        >
+                          {tx('ลบรูป', 'Remove')}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {lineQrFeedback && (
+                    <p
+                      className="text-xs font-bold rounded-xl px-3 py-2"
+                      style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
+                    >
+                      {lineQrFeedback}
+                    </p>
+                  )}
+
+                  <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
                     {tx(
-                      'ลูกค้าสามารถแนบและส่งสลิปผ่านหน้าเว็บโดยตรงเป็นหลัก และหากใส่ลิงก์ LINE ไว้ ปุ่มสำรอง "ส่งสลิปทาง LINE" จะลิงก์มาที่แชตร้านโดยตรงค่ะ',
-                      'Customers upload slips directly on the web as the main channel; adding your LINE URL connects the small backup "Send via LINE" button.'
+                      'ใช้ได้ทั้งรูป QR ส่วนตัวและ LINE OA (@ชื่อร้าน) · หากไม่มี @ ลูกค้าจะเลือกห้องแชทร้านใน LINE หรือสแกน QR เพิ่มเพื่อนก่อนส่งได้ทันทีค่ะ',
+                      'Works with both personal LINE QR and LINE OA (@shop) images.'
                     )}
                   </p>
                 </div>

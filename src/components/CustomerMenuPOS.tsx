@@ -4,8 +4,11 @@ import {
   Check,
   CheckCircle2,
   Coffee,
+  Copy,
+  ExternalLink,
   Eye,
   FileImage,
+  MessageCircle,
   Minus,
   Plus,
   QrCode,
@@ -29,6 +32,12 @@ import {
   useLang,
 } from '../config/i18n';
 import { BillLineItem, CustomerQueueOrder } from '../utils/sheetsSync';
+import {
+  buildLineOrderText,
+  buildLineSendHref,
+  copyOrderTextToClipboard,
+  extractLineOaId,
+} from '../utils/lineOrder';
 import { playSoftClick } from '../utils/sound';
 import { MamaBearMascot, PapaBearVespaMascot } from './BearGangMascot';
 
@@ -41,6 +50,8 @@ interface CustomerMenuPOSProps {
   outfits: BearFamilyOutfits;
   foodShopNameTh: string;
   foodShopNameEn: string;
+  lineShopUrl?: string;
+  lineQrImageUrl?: string;
   isMerchantView?: boolean;
   initialTableNumber?: string;
   onAddMenuItem: (item: MenuItem, options?: { qty?: number; tasteNote?: string }) => void;
@@ -84,6 +95,8 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
   outfits,
   foodShopNameTh,
   foodShopNameEn,
+  lineShopUrl = '',
+  lineQrImageUrl = '',
   isMerchantView = false,
   initialTableNumber = '',
   onAddMenuItem,
@@ -115,6 +128,8 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
   const [modalQty, setModalQty] = useState<number>(1);
   const [previewOrder, setPreviewOrder] = useState<CustomerQueueOrder | null>(null);
   const [isRefreshingOrders, setIsRefreshingOrders] = useState(false);
+  const [lineCopiedNotice, setLineCopiedNotice] = useState(false);
+  const [lineQrModalOpen, setLineQrModalOpen] = useState(false);
 
   const orderableItems = useMemo(
     () => menuItems.filter((item) => item.price > 0 && item.source !== 'customer'),
@@ -668,17 +683,17 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                 </div>
 
                 {(() => {
-                  const handlePayClick = () => {
+                  const validateOrderForm = (): boolean => {
                     if (!isMerchantView) {
                       if (deliveryType === 'ทานนี้' && !tableNumber.trim()) {
                         setOrderFormError(
                           tx(
-                            'กรุณากรอกเลขโต๊ะในช่อง "โต๊ะที่" ก่อนกดชำระเงินนะคะ (เช่น 7)',
-                            'Please enter your table number before checking out (e.g. 7).'
+                            'กรุณากรอกเลขโต๊ะในช่อง "โต๊ะที่" ก่อนกดดำเนินการต่อนะคะ (เช่น 7)',
+                            'Please enter your table number before continuing (e.g. 7).'
                           )
                         );
                         tableInputRef.current?.focus();
-                        return;
+                        return false;
                       }
                       if (deliveryType === 'ให้พ่อไปส่ง' && !customerName.trim()) {
                         setOrderFormError(
@@ -688,7 +703,7 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                           )
                         );
                         customerNameInputRef.current?.focus();
-                        return;
+                        return false;
                       }
                       if (deliveryType === 'ให้พ่อไปส่ง' && !dropPoint.trim()) {
                         setOrderFormError(
@@ -698,10 +713,15 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                           )
                         );
                         dropPointInputRef.current?.focus();
-                        return;
+                        return false;
                       }
                     }
                     setOrderFormError('');
+                    return true;
+                  };
+
+                  const handlePayClick = () => {
+                    if (!validateOrderForm()) return;
                     onSubmitOrderPayment('qr', {
                       deliveryType,
                       tableNumber: deliveryType === 'ทานนี้' ? tableNumber.trim() : undefined,
@@ -709,6 +729,28 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                       dropPoint,
                     });
                   };
+
+                  const lineOrderText = buildLineOrderText({
+                    shopNameTh: foodShopNameTh,
+                    items: cartItems,
+                    totalAmount: cartTotal,
+                    deliveryInfo: {
+                      deliveryType,
+                      tableNumber: deliveryType === 'ทานนี้' ? tableNumber.trim() : undefined,
+                      customerName: customerName.trim() || undefined,
+                      dropPoint: dropPoint.trim() || undefined,
+                    },
+                    noteLine: tx(
+                      '📩 ส่งรายการอาหารจากหน้าเมนูเว็บค่ะ',
+                      '📩 Ordered via web menu'
+                    ),
+                  });
+                  const hasOaId = Boolean(extractLineOaId(lineShopUrl));
+                  const cleanCustomLineUrl = /^https?:\/\//i.test(lineShopUrl.trim())
+                    ? lineShopUrl.trim()
+                    : '';
+                  const lineSendHref = buildLineSendHref(lineOrderText, lineShopUrl);
+                  const canSendOrder = cartTotal > 0 && onlineOrderEnabled;
 
                   return (
                     <div className="space-y-2">
@@ -727,7 +769,7 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                       </p>
                       <button
                         type="button"
-                        disabled={cartTotal <= 0 || !onlineOrderEnabled}
+                        disabled={!canSendOrder}
                         onClick={handlePayClick}
                         className="w-full h-14 rounded-2xl font-bold text-white flex items-center justify-center gap-2 cursor-pointer disabled:opacity-45 transition-transform active:scale-95"
                         style={{
@@ -737,6 +779,116 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                         <QrCode className="w-5 h-5" />
                         {tx('สแกนจ่าย QR', 'Scan QR')}
                       </button>
+
+                      {/* ส่งเมนูอาหารเข้า LINE ร้าน (จัดเรียงรายการอาหาร + เลขโต๊ะ/จุดส่งอัตโนมัติ) */}
+                      <div className="flex items-center gap-1.5">
+                        <a
+                          href={canSendOrder ? lineSendHref : undefined}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          aria-disabled={!canSendOrder}
+                          onClick={(e) => {
+                            if (!canSendOrder) {
+                              e.preventDefault();
+                              return;
+                            }
+                            if (!validateOrderForm()) {
+                              e.preventDefault();
+                              return;
+                            }
+                            playSoftClick();
+                            void copyOrderTextToClipboard(lineOrderText);
+                            setLineCopiedNotice(true);
+                            window.setTimeout(() => setLineCopiedNotice(false), 4500);
+                          }}
+                          className={`flex-1 h-12 rounded-2xl border-2 font-bold text-sm flex items-center justify-center gap-2 transition-transform active:scale-95 ${
+                            canSendOrder ? 'cursor-pointer hover:opacity-90' : 'opacity-45 pointer-events-none'
+                          }`}
+                          style={{
+                            backgroundColor: '#DCFCE7',
+                            borderColor: '#4ADE80',
+                            color: '#15803D',
+                          }}
+                        >
+                          <MessageCircle className="w-4 h-4 shrink-0" />
+                          <span>{tx('ส่งเมนูอาหารเข้า LINE ร้าน', 'Send Order to Shop LINE')}</span>
+                          <ExternalLink className="w-3.5 h-3.5 opacity-80 shrink-0" />
+                        </a>
+
+                        <button
+                          type="button"
+                          disabled={!canSendOrder}
+                          onClick={async () => {
+                            if (!canSendOrder || !validateOrderForm()) return;
+                            playSoftClick();
+                            await copyOrderTextToClipboard(lineOrderText);
+                            setLineCopiedNotice(true);
+                            window.setTimeout(() => setLineCopiedNotice(false), 4500);
+                          }}
+                          title={tx('คัดลอกรายการอาหารเพื่อนำไปวางใน LINE', 'Copy order text to paste in LINE')}
+                          className="h-12 px-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-1 cursor-pointer disabled:opacity-45 shrink-0"
+                          style={{
+                            backgroundColor: 'var(--bg-canvas)',
+                            borderColor: 'var(--border-soft)',
+                            color: 'var(--text-main)',
+                          }}
+                        >
+                          <Copy className="w-4 h-4" />
+                        </button>
+
+                        {lineQrImageUrl && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              playSoftClick();
+                              if (canSendOrder) {
+                                void copyOrderTextToClipboard(lineOrderText);
+                              }
+                              setLineQrModalOpen(true);
+                            }}
+                            title={tx('ดูรูปคิวอาร์โค้ด LINE ร้าน', 'View Shop LINE QR Code')}
+                            className="h-12 px-3 rounded-2xl border text-xs font-bold flex items-center justify-center gap-1 cursor-pointer shrink-0"
+                            style={{
+                              backgroundColor: 'var(--bg-canvas)',
+                              borderColor: '#4ADE80',
+                              color: '#15803D',
+                            }}
+                          >
+                            <QrCode className="w-4 h-4" />
+                            <span>QR</span>
+                          </button>
+                        )}
+                      </div>
+
+                      {lineCopiedNotice && (
+                        <div
+                          className="rounded-xl border px-3 py-2 text-[11px] font-semibold space-y-1"
+                          style={{ backgroundColor: '#ECFDF5', borderColor: '#6EE7B7', color: '#065F46' }}
+                        >
+                          <p>
+                            {hasOaId
+                              ? tx(
+                                  'เปิด LINE แชทร้านพร้อมคัดลอกรายการอาหารให้แล้วค่ะ ✓',
+                                  'Opened Shop LINE chat & copied order summary ✓'
+                                )
+                              : tx(
+                                  'คัดลอกรายการอาหารและเปิด LINE แล้วค่ะ เลือกแชทร้านแล้วกดส่งได้เลย (กด "วาง" ได้ทันทีหากใช้ลิงก์สำรอง)',
+                                  'Order summary copied & LINE opened! Pick the shop chat to send.'
+                                )}
+                          </p>
+                          {!hasOaId && cleanCustomLineUrl && (
+                            <a
+                              href={cleanCustomLineUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 underline font-bold"
+                            >
+                              {tx('หรือเปิดลิงก์แชทร้านที่ตั้งไว้แล้วกดวาง', 'Or open saved shop LINE link & paste')}
+                              <ExternalLink className="w-3 h-3" />
+                            </a>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })()}
@@ -1301,6 +1453,92 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                 >
                   {tx('ปิดหน้าต่าง', 'Close')}
                 </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal คิวอาร์โค้ด LINE ร้านสำหรับลูกค้าสแกนเพิ่มเพื่อน + กดคัดลอกออเดอร์ */}
+      {lineQrModalOpen && lineQrImageUrl && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-sm p-4"
+          onClick={() => setLineQrModalOpen(false)}
+        >
+          <div
+            className="w-full max-w-sm rounded-3xl border shadow-2xl overflow-hidden p-5 space-y-4 text-center"
+            style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <h4 className="font-bold text-base flex items-center gap-2" style={{ color: '#15803D' }}>
+                <MessageCircle className="w-5 h-5" />
+                {tx(`LINE ร้าน (${foodShopNameTh})`, `Shop LINE (${foodShopNameEn})`)}
+              </h4>
+              <button
+                type="button"
+                onClick={() => setLineQrModalOpen(false)}
+                className="w-9 h-9 rounded-xl border flex items-center justify-center cursor-pointer"
+                style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+                aria-label={tx('ปิด', 'Close')}
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="rounded-2xl border bg-white p-3 flex justify-center" style={{ borderColor: '#86EFAC' }}>
+              <img
+                src={lineQrImageUrl}
+                alt={tx('คิวอาร์โค้ด LINE ร้าน', 'Shop LINE QR Code')}
+                className="w-60 h-60 object-contain rounded-xl"
+              />
+            </div>
+
+            <p className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              {tx(
+                'สแกนคิวอาร์โค้ดเพื่อเพิ่มเพื่อน LINE ร้าน แล้วกดปุ่ม "คัดลอกรายการอาหาร" ไปวางส่งในแชทได้เลยค่ะ',
+                'Scan this QR to add our LINE shop, then copy & paste your order summary in chat!'
+              )}
+            </p>
+
+            <div className="flex flex-col gap-2">
+              {cartTotal > 0 && (
+                <button
+                  type="button"
+                  onClick={async () => {
+                    playSoftClick();
+                    const summary = buildLineOrderText({
+                      shopNameTh: foodShopNameTh,
+                      items: cartItems,
+                      totalAmount: cartTotal,
+                      deliveryInfo: {
+                        deliveryType,
+                        tableNumber: deliveryType === 'ทานนี้' ? tableNumber.trim() : undefined,
+                        customerName: customerName.trim() || undefined,
+                        dropPoint: dropPoint.trim() || undefined,
+                      },
+                    });
+                    await copyOrderTextToClipboard(summary);
+                    setLineCopiedNotice(true);
+                  }}
+                  className="w-full h-11 rounded-2xl font-bold text-sm text-white flex items-center justify-center gap-2 cursor-pointer"
+                  style={{ backgroundColor: '#16A34A' }}
+                >
+                  <Copy className="w-4 h-4" />
+                  {tx('คัดลอกรายการอาหารที่เลือกไว้ ✓', 'Copy Order Summary ✓')}
+                </button>
+              )}
+              {/^https?:\/\//i.test(lineShopUrl.trim()) && (
+                <a
+                  href={lineShopUrl.trim()}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="w-full h-11 rounded-2xl border font-bold text-sm flex items-center justify-center gap-2"
+                  style={{ backgroundColor: 'var(--bg-canvas)', borderColor: '#4ADE80', color: '#15803D' }}
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  {tx('เปิดลิงก์ LINE ร้าน', 'Open Shop LINE Link')}
+                </a>
               )}
             </div>
           </div>

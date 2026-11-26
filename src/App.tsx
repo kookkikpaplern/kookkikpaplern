@@ -105,6 +105,7 @@ const KEYS = {
   PAYMENT_ACCOUNTS: 'kkp_payment_accounts',
   ACTIVE_PAYMENT_ACCOUNT_ID: 'kkp_active_payment_account_id',
   LINE_SHOP_URL: 'kkp_line_shop_url',
+  LINE_QR_IMAGE: 'kkp_line_qr_image_url',
   SCRIPT_URL: 'kkp_script_url',
   REWARD_NOTICE: 'kkp_reward_notice',
   PROMO_TITLE: 'kkp_promo_title',
@@ -343,6 +344,9 @@ export default function App() {
 
   const [lineShopUrl, setLineShopUrl] = useState<string>(
     () => localStorage.getItem(KEYS.LINE_SHOP_URL) || SHOP_CONFIG.lineShopUrl
+  );
+  const [lineQrImageUrl, setLineQrImageUrl] = useState<string>(
+    () => localStorage.getItem(KEYS.LINE_QR_IMAGE) || SHOP_CONFIG.lineQrImageUrl
   );
   const [scriptUrl, setScriptUrl] = useState<string>(
     () => localStorage.getItem(KEYS.SCRIPT_URL) || SHOP_CONFIG.scriptUrl
@@ -634,6 +638,18 @@ export default function App() {
       setLineShopUrl(s.lineShopUrl);
       localStorage.setItem(KEYS.LINE_SHOP_URL, s.lineShopUrl);
     }
+    if (s.lineQrImageUrl !== undefined) {
+      setLineQrImageUrl(s.lineQrImageUrl);
+      try {
+        if (s.lineQrImageUrl) {
+          localStorage.setItem(KEYS.LINE_QR_IMAGE, s.lineQrImageUrl);
+        } else {
+          localStorage.removeItem(KEYS.LINE_QR_IMAGE);
+        }
+      } catch {
+        // Ignore storage quota error
+      }
+    }
     if (s.rewardNotice) {
       setRewardNotice(s.rewardNotice);
       localStorage.setItem(KEYS.REWARD_NOTICE, s.rewardNotice);
@@ -718,6 +734,7 @@ export default function App() {
       ),
       activePaymentAccountId,
       lineShopUrl,
+      lineQrImageUrl,
       rewardNotice,
       promoTitle,
       promoSubtitle,
@@ -743,6 +760,7 @@ export default function App() {
       paymentAccounts,
       activePaymentAccountId,
       lineShopUrl,
+      lineQrImageUrl,
       rewardNotice,
       promoTitle,
       promoSubtitle,
@@ -1743,6 +1761,8 @@ export default function App() {
             outfits={bearOutfits}
             foodShopNameTh={foodShopNameTh}
             foodShopNameEn={foodShopNameEn}
+            lineShopUrl={lineShopUrl}
+            lineQrImageUrl={lineQrImageUrl}
             isMerchantView={false}
             initialTableNumber={initialCustomerTable}
             onAddMenuItem={(item, options) => {
@@ -1818,6 +1838,8 @@ export default function App() {
           outfits={bearOutfits}
           allowSlipUpload={true}
           lineShopUrl={lineShopUrl}
+          lineQrImageUrl={lineQrImageUrl}
+          deliveryInfo={checkoutState.deliveryInfo}
           roomId={orgCode}
           onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle' }))}
           onConfirmPaid={(slipUrl, bankLabel, slipMeta) =>
@@ -1849,6 +1871,7 @@ export default function App() {
               ? queueOrders.find((q) => q.orderId === checkoutState.pendingOrderId) || null
               : null
           }
+          lineShopUrl={lineShopUrl}
           onClose={() =>
             setCheckoutState((prev) => ({
               ...prev,
@@ -2539,6 +2562,8 @@ export default function App() {
             outfits={bearOutfits}
             foodShopNameTh={foodShopNameTh}
             foodShopNameEn={foodShopNameEn}
+            lineShopUrl={lineShopUrl}
+            lineQrImageUrl={lineQrImageUrl}
             isMerchantView={true}
             onAddMenuItem={(item, options) => {
               const tasteNote = options?.tasteNote?.trim() || undefined;
@@ -2694,6 +2719,9 @@ export default function App() {
         scriptUrl={scriptUrl}
         mascotMode={checkoutState.source === 'menu' ? 'krua' : 'kids'}
         outfits={bearOutfits}
+        lineShopUrl={lineShopUrl}
+        lineQrImageUrl={lineQrImageUrl}
+        deliveryInfo={checkoutState.deliveryInfo}
         roomId={orgCode}
         onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle' }))}
         onConfirmPaid={(slipUrl, bankLabel, slipMeta) =>
@@ -2720,6 +2748,7 @@ export default function App() {
               checkoutState.receipt
             : null
         }
+        lineShopUrl={lineShopUrl}
         onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle', receipt: null }))}
       />
 
@@ -2804,6 +2833,20 @@ export default function App() {
             setLineShopUrl(val);
             localStorage.setItem(KEYS.LINE_SHOP_URL, val);
             pushConfigSnapshotRef.current({ lineShopUrl: val });
+          }}
+          lineQrImageUrl={lineQrImageUrl}
+          onChangeLineQrImageUrl={(val) => {
+            setLineQrImageUrl(val);
+            try {
+              if (val) {
+                localStorage.setItem(KEYS.LINE_QR_IMAGE, val);
+              } else {
+                localStorage.removeItem(KEYS.LINE_QR_IMAGE);
+              }
+            } catch {
+              // Ignore quota errors
+            }
+            pushConfigSnapshotRef.current({ lineQrImageUrl: val });
           }}
           scriptUrl={scriptUrl}
           onChangeScriptUrl={(val) => {
