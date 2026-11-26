@@ -461,7 +461,21 @@ export function loadCachedMenu(): MenuItem[] | null {
 }
 
 export function saveCachedMenu(menu: MenuItem[]): void {
-  localStorage.setItem(STORAGE_KEYS.MENU_CACHE, JSON.stringify(menu));
+  try {
+    localStorage.setItem(STORAGE_KEYS.MENU_CACHE, JSON.stringify(menu));
+  } catch {
+    try {
+      // Fallback: strip bulky inline dataURLs if browser localStorage quota is full
+      const compact = menu.map((m) =>
+        m.imageUrl && m.imageUrl.startsWith('data:image/') && m.imageUrl.length > 16000
+          ? { ...m, imageUrl: undefined }
+          : m
+      );
+      localStorage.setItem(STORAGE_KEYS.MENU_CACHE, JSON.stringify(compact));
+    } catch {
+      // Never throw and block POS state or Google Sheets push
+    }
+  }
 }
 
 export function loadCachedStaffUsers(): Record<string, StaffUser> | null {
@@ -483,7 +497,11 @@ export function loadCachedFaqs(): FaqItem[] | null {
 }
 
 export function saveCachedFaqs(faqs: FaqItem[]): void {
-  localStorage.setItem(STORAGE_KEYS.FAQ_CACHE, JSON.stringify(faqs));
+  try {
+    localStorage.setItem(STORAGE_KEYS.FAQ_CACHE, JSON.stringify(faqs));
+  } catch {
+    // Ignore storage quota errors
+  }
 }
 
 export function loadCachedRewardOffers(): RewardOffer[] | null {
@@ -496,7 +514,11 @@ export function loadCachedRewardOffers(): RewardOffer[] | null {
 }
 
 export function saveCachedRewardOffers(offers: RewardOffer[]): void {
-  localStorage.setItem(STORAGE_KEYS.REWARD_OFFERS_CACHE, JSON.stringify(offers));
+  try {
+    localStorage.setItem(STORAGE_KEYS.REWARD_OFFERS_CACHE, JSON.stringify(offers));
+  } catch {
+    // Ignore storage quota errors
+  }
 }
 
 export async function checkAutoPaymentFromSheets(

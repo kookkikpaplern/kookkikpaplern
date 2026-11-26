@@ -124,11 +124,11 @@ export async function parseProductsFromExcelFile(file: File): Promise<ParsedExce
     };
   }
 
-  // Detect header row (check first 3 rows)
+  // Detect header row (check first 6 rows in case Excel has title/banner rows above table)
   let headerRowIndex = -1;
   let colMap: Partial<Record<keyof typeof HEADER_ALIASES, number>> = {};
 
-  for (let r = 0; r < Math.min(3, rawRows.length); r++) {
+  for (let r = 0; r < Math.min(6, rawRows.length); r++) {
     const candidateMap: Partial<Record<keyof typeof HEADER_ALIASES, number>> = {};
     let matchedCount = 0;
     rawRows[r].forEach((cell, colIdx) => {

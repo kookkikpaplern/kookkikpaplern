@@ -158,7 +158,8 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
       return;
     }
 
-    // AI ตรวจคัดกรองรูปภาพก่อนบันทึก (บล็อกคน สัตว์ รูปไม่เหมาะสม หรือรูปไม่เกี่ยวข้องทันที)
+    // AI ตรวจคัดกรองรูปภาพก่อนบันทึก (บล็อกคน สัตว์ รูปไม่เหมาะสม หรือรูปไม่เกี่ยวข้องทันที หากเชื่อมต่อ AI ได้)
+    let aiSkippedNote = '';
     setIsVerifyingAi(true);
     try {
       const res = await fetch('/api/verify-product-image', {
@@ -170,36 +171,37 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
           lang,
         }),
       });
-      const data = (await res.json().catch(() => ({}))) as {
-        allowed?: boolean;
-        reason?: string;
-      };
+      if (res.ok) {
+        const data = (await res.json().catch(() => ({}))) as {
+          allowed?: boolean;
+          reason?: string;
+        };
 
-      if (!res.ok || data.allowed !== true) {
-        playScanError();
-        setFeedback({
-          type: 'err',
-          text:
-            data.reason ||
-            tx(
-              'รูปภาพไม่ผ่านการคัดกรอง (อนุญาตเฉพาะภาพสินค้าเท่านั้น) ระบบจึงปฏิเสธการบันทึกค่ะ',
-              'Image blocked by AI screening (only product photos are allowed).'
-            ),
-        });
-        setIsVerifyingAi(false);
-        return;
+        if (data.allowed === false) {
+          playScanError();
+          setFeedback({
+            type: 'err',
+            text:
+              data.reason ||
+              tx(
+                'รูปภาพไม่ผ่านการคัดกรอง (อนุญาตเฉพาะภาพสินค้าเท่านั้น) ระบบจึงปฏิเสธการบันทึกค่ะ',
+                'Image blocked by AI screening (only product photos are allowed).'
+              ),
+          });
+          setIsVerifyingAi(false);
+          return;
+        }
+      } else {
+        aiSkippedNote = tx(
+          ' (ข้ามการตรวจภาพ AI ชั่วคราว)',
+          ' (AI photo check unavailable)'
+        );
       }
     } catch {
-      playScanError();
-      setFeedback({
-        type: 'err',
-        text: tx(
-          'ไม่สามารถเชื่อมต่อระบบ AI ตรวจสอบรูปภาพได้ในขณะนี้ จึงระงับการบันทึกไว้ก่อนค่ะ',
-          'Could not reach AI image screening right now. Upload blocked for safety.'
-        ),
-      });
-      setIsVerifyingAi(false);
-      return;
+      aiSkippedNote = tx(
+        ' (ข้ามการตรวจภาพ AI ชั่วคราว)',
+        ' (AI photo check unavailable)'
+      );
     }
 
     setIsVerifyingAi(false);
@@ -238,8 +240,8 @@ export const BarcodeDonationHub: React.FC<BarcodeDonationHubProps> = ({
     setFeedback({
       type: 'ok',
       text: tx(
-        `เพิ่ม "${productName}" (${code}) เข้าคลังสินค้า POS และหลังบ้านอัตโนมัติเรียบร้อยแล้วค่ะ พร้อมยิงบาร์โค้ดคิดเงินทันที!`,
-        `Added "${productName}" (${code}) to POS & backend catalog automatically!`
+        `เพิ่ม "${productName}" (${code}) เข้าคลังสินค้า POS และหลังบ้านอัตโนมัติเรียบร้อยแล้วค่ะ พร้อมยิงบาร์โค้ดคิดเงินทันที!${aiSkippedNote}`,
+        `Added "${productName}" (${code}) to POS & backend catalog automatically!${aiSkippedNote}`
       ),
     });
   };

@@ -233,6 +233,11 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   const [newProdStars, setNewProdStars] = useState('2');
   const [newProdCategory, setNewProdCategory] = useState('อาหารจานเดียว');
   const [newProdImageUrl, setNewProdImageUrl] = useState('');
+  const [addProdFeedback, setAddProdFeedback] = useState<{
+    type: 'ok' | 'err';
+    text: string;
+  } | null>(null);
+  const excelPreviewRef = useRef<HTMLDivElement>(null);
 
   const filteredProducts = useMemo(() => {
     const q = productSearch.trim().toLowerCase();
@@ -481,6 +486,9 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
         return;
       }
       setExcelPreview(parsed);
+      window.setTimeout(() => {
+        excelPreviewRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }, 80);
     } catch {
       setExcelPreview(null);
       setStatusMsg(
@@ -502,7 +510,8 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
     );
     onChangeMenuItems(nextItems);
     setExcelPreview(null);
-    setStatusMsg(
+    setProductSearch('');
+    const msg =
       importMode === 'replace'
         ? tx(
             `นำเข้าและแทนที่สินค้าทั้งหมด ${addedCount} รายการเรียบร้อยแล้วค่ะ (พร้อมยิงบาร์โค้ดทันที!)`,
@@ -511,17 +520,31 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
         : tx(
             `นำเข้าข้อมูลสำเร็จ! เพิ่มใหม่ ${addedCount} รายการ, อัปเดต ${updatedCount} รายการ (รวม ${nextItems.length} รายการ)`,
             `Import complete! Added ${addedCount}, updated ${updatedCount} (Total: ${nextItems.length} items).`
-          )
-    );
+          );
+    setStatusMsg(msg);
+    setAddProdFeedback({ type: 'ok', text: msg });
   };
 
   const handleAddSingleProduct = (e: React.FormEvent) => {
     e.preventDefault();
     playSoftClick();
+    setAddProdFeedback(null);
     const name = newProdName.trim();
-    const price = Number(newProdPrice);
-    if (!name || Number.isNaN(price) || price < 0) {
-      setStatusMsg(tx('กรุณากรอกชื่อสินค้าและราคาให้ถูกต้องค่ะ', 'Please enter a valid product name and price.'));
+    const priceTrimmed = newProdPrice.trim();
+    const price = Number(priceTrimmed);
+    if (!name) {
+      const errText = tx('กรุณากรอกชื่อสินค้า/เมนูอาหารก่อนนะคะ', 'Please enter a product or dish name.');
+      setStatusMsg(errText);
+      setAddProdFeedback({ type: 'err', text: errText });
+      return;
+    }
+    if (!priceTrimmed || Number.isNaN(price) || price <= 0) {
+      const errText = tx(
+        'กรุณากรอกราคาขาย (มากกว่า 0 บาท) เพื่อให้สินค้าแสดงในหน้าเมนูขายค่ะ',
+        'Please enter a selling price greater than 0 so it appears on the menu.'
+      );
+      setStatusMsg(errText);
+      setAddProdFeedback({ type: 'err', text: errText });
       return;
     }
     const stars = Math.max(0, parseInt(newProdStars, 10) || 1);
@@ -536,18 +559,47 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
       imageUrl: newProdImageUrl || undefined,
       status: 'พร้อมขาย',
     };
-    const { nextItems, updatedCount } = mergeImportedMenuItems(menuItems, [newItem], 'merge');
+
+    const existingIdx = menuItems.findIndex((item) => {
+      if (barcode && item.barcode) {
+        return item.barcode.trim() === barcode;
+      }
+      return item.name.trim() === name;
+    });
+
+    let nextItems: MenuItem[];
+    let isUpdate = false;
+    if (existingIdx >= 0) {
+      isUpdate = true;
+      nextItems = menuItems.map((item, idx) =>
+        idx === existingIdx
+          ? {
+              ...newItem,
+              id: item.id,
+              imageUrl: newItem.imageUrl || item.imageUrl,
+            }
+          : item
+      );
+    } else {
+      // Prepend newly added product so it appears right at the top of the catalog immediately
+      nextItems = [newItem, ...menuItems];
+    }
+
     onChangeMenuItems(nextItems);
+    setProductSearch('');
     setNewProdBarcode('');
     setNewProdName('');
     setNewProdPrice('');
     setNewProdStars('2');
     setNewProdImageUrl('');
-    setStatusMsg(
-      updatedCount > 0
-        ? tx(`อัปเดตสินค้า "${name}" เรียบร้อยแล้วค่ะ`, `Updated product "${name}".`)
-        : tx(`เพิ่มสินค้า "${name}" เข้าระบบเรียบร้อยแล้วค่ะ`, `Added product "${name}" to catalog.`)
-    );
+    const okMsg = isUpdate
+      ? tx(`อัปเดตสินค้า "${name}" (฿${price}) เรียบร้อยแล้วค่ะ`, `Updated product "${name}" (฿${price}).`)
+      : tx(
+          `เพิ่มสินค้า "${name}" (฿${price}) เข้าระบบเรียบร้อยแล้วค่ะ พร้อมขายและสั่งผ่านเมนูทันที!`,
+          `Added "${name}" (฿${price}) to catalog — live in POS & customer menu!`
+        );
+    setStatusMsg(okMsg);
+    setAddProdFeedback({ type: 'ok', text: okMsg });
   };
 
   const handleNewProductImageSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1863,6 +1915,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                 {/* Preview & Confirm Panel */}
                 {excelPreview && (
                   <div
+                    ref={excelPreviewRef}
                     className="rounded-2xl border-2 p-4 space-y-3"
                     style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--accent-primary)' }}
                   >
@@ -2137,6 +2190,23 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                     {tx('เพิ่มสินค้า', 'Add Product')}
                   </button>
                 </div>
+
+                {addProdFeedback && (
+                  <div
+                    className="rounded-xl px-3.5 py-2.5 text-xs sm:text-sm font-bold flex items-center gap-2"
+                    style={{
+                      backgroundColor: addProdFeedback.type === 'ok' ? '#DCFCE7' : '#FFE4E6',
+                      color: addProdFeedback.type === 'ok' ? '#166534' : '#9F1239',
+                    }}
+                  >
+                    {addProdFeedback.type === 'ok' ? (
+                      <Check className="w-4 h-4 shrink-0" />
+                    ) : (
+                      <ShieldAlert className="w-4 h-4 shrink-0" />
+                    )}
+                    <span>{addProdFeedback.text}</span>
+                  </div>
+                )}
               </form>
 
               {/* Hidden file input shared by all existing product cards for mobile/desktop photo upload */}

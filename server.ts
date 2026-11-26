@@ -363,6 +363,38 @@ async function startServer() {
     res.json({ ok: true });
   });
 
+  app.post('/api/sync/config', (req, res) => {
+    const { roomId, settings, menu, faqs, rewardOffers } = req.body as {
+      roomId?: string;
+      settings?: Record<string, string>;
+      menu?: unknown[];
+      faqs?: unknown[];
+      rewardOffers?: unknown[];
+    };
+    const cleanRoomId = sanitizeRoomId(roomId);
+    const room = getOrCreateSyncRoom(cleanRoomId);
+    const updatedAt = Date.now();
+    room.sharedConfig = {
+      ...room.sharedConfig,
+      ...(settings ? { settings } : {}),
+      ...(Array.isArray(menu) ? { menu } : {}),
+      ...(Array.isArray(faqs) ? { faqs } : {}),
+      ...(Array.isArray(rewardOffers) ? { rewardOffers } : {}),
+      updatedAt,
+    };
+    schedulePersistRooms();
+    broadcastSync(room, {
+      type: 'sync:config-updated',
+      roomId: cleanRoomId,
+      fromClientId: 'http_api',
+      settings,
+      menu,
+      faqs,
+      rewardOffers,
+    });
+    res.json({ ok: true, updatedAt });
+  });
+
   app.get('/api/call/status', (req, res) => {
     const roomId = sanitizeRoomId(req.query.roomId);
     res.json({

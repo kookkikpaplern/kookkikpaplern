@@ -778,6 +778,8 @@ export default function App() {
     };
   }, [buildSettingsPayload, scriptUrl]);
 
+  const lastLocalMenuEditAtRef = useRef<number>(0);
+
   const showToast = useCallback((type: 'ok' | 'err', text: string) => {
     setScanToast({ type, text });
     window.setTimeout(() => setScanToast(null), 3200);
@@ -885,7 +887,11 @@ export default function App() {
       }
       if (sharedConfig) {
         if (sharedConfig.settings) applySettingsFromRecord(sharedConfig.settings);
-        if (Array.isArray(sharedConfig.menu) && sharedConfig.menu.length > 0) {
+        if (
+          Array.isArray(sharedConfig.menu) &&
+          sharedConfig.menu.length > 0 &&
+          (!sharedConfig.updatedAt || sharedConfig.updatedAt > lastLocalMenuEditAtRef.current)
+        ) {
           setMenuItems(sharedConfig.menu);
           saveCachedMenu(sharedConfig.menu);
         }
@@ -1059,6 +1065,7 @@ export default function App() {
         const data = (await res.json()) as {
           orders?: CustomerQueueOrder[];
           receipts?: ReceiptSlipRecord[];
+          sharedConfig?: SharedShopConfigPayload;
         };
         if (!active) return;
         if (Array.isArray(data.orders) && data.orders.length > 0) {
@@ -1066,6 +1073,17 @@ export default function App() {
         }
         if (Array.isArray(data.receipts) && data.receipts.length > 0) {
           mergeReceiptsIntoState(data.receipts);
+        }
+        if (
+          data.sharedConfig &&
+          Array.isArray(data.sharedConfig.menu) &&
+          data.sharedConfig.menu.length > 0 &&
+          data.sharedConfig.updatedAt &&
+          data.sharedConfig.updatedAt > lastLocalMenuEditAtRef.current
+        ) {
+          lastLocalMenuEditAtRef.current = data.sharedConfig.updatedAt;
+          setMenuItems(data.sharedConfig.menu);
+          saveCachedMenu(data.sharedConfig.menu);
         }
       } catch {
         // Ignore transient offline error
@@ -1229,10 +1247,16 @@ export default function App() {
         stockMode: 'unlimited',
       };
 
-      const nextItems = [...menuItems, donatedItem];
+      const nextItems = [donatedItem, ...menuItems];
+      lastLocalMenuEditAtRef.current = Date.now();
       setMenuItems(nextItems);
       saveCachedMenu(nextItems);
       syncBroadcastRef.current.broadcastConfigUpdated({ menu: nextItems });
+      fetch('/api/sync/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomId: orgCode, menu: nextItems }),
+      }).catch(() => {});
 
       if (scriptUrl && scriptUrl.trim()) {
         postToSheets(scriptUrl, 'ตั้งค่าเมนู', { menu: nextItems });
@@ -1240,7 +1264,7 @@ export default function App() {
 
       return { ok: true };
     },
-    [menuItems, scriptUrl, tx]
+    [menuItems, orgCode, scriptUrl, tx]
   );
 
   // Complete Payment & Send to Google Sheets (แยกแท็บ ขายจริง_หน้าร้าน / ขายจริง_ครัวแม่วัง / ทดสอบระบบ)
@@ -2840,9 +2864,15 @@ export default function App() {
           }}
           menuItems={menuItems}
           onChangeMenuItems={(next) => {
+            lastLocalMenuEditAtRef.current = Date.now();
             setMenuItems(next);
             saveCachedMenu(next);
             syncBroadcastRef.current.broadcastConfigUpdated({ menu: next });
+            fetch('/api/sync/config', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ roomId: orgCode, menu: next }),
+            }).catch(() => {});
             if (scriptUrl && scriptUrl.trim()) {
               postToSheets(scriptUrl, 'ตั้งค่าเมนู', { menu: next });
             }

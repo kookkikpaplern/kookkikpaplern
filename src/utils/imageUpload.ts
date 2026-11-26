@@ -12,30 +12,34 @@ export async function compressProductImageFile(file: File, targetSize = 320): Pr
       img.onerror = () => reject(new Error('Invalid image format'));
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        canvas.width = targetSize;
-        canvas.height = targetSize;
         const ctx = canvas.getContext('2d');
         if (!ctx) {
           reject(new Error('Canvas context unavailable'));
           return;
         }
 
-        // White background in case of transparent PNG
-        ctx.fillStyle = '#FFFFFF';
-        ctx.fillRect(0, 0, targetSize, targetSize);
-
-        // Center-crop square so thumbnails & CustomerMenuPOS cards look clean
         const minSide = Math.min(img.width, img.height);
         const sx = (img.width - minSide) / 2;
         const sy = (img.height - minSide) / 2;
-        ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, targetSize, targetSize);
 
-        let quality = 0.78;
-        let dataUrl = canvas.toDataURL('image/jpeg', quality);
-        // Keep well under localStorage & Google Sheets cell limits (~35KB max)
-        while (dataUrl.length > 35000 && quality > 0.35) {
-          quality -= 0.1;
+        let dim = targetSize;
+        let dataUrl = '';
+        while (dim >= 140) {
+          canvas.width = dim;
+          canvas.height = dim;
+          ctx.fillStyle = '#FFFFFF';
+          ctx.fillRect(0, 0, dim, dim);
+          ctx.drawImage(img, sx, sy, minSide, minSide, 0, 0, dim, dim);
+
+          let quality = 0.78;
           dataUrl = canvas.toDataURL('image/jpeg', quality);
+          // Keep well under localStorage & Google Sheets 50k cell limit (~38KB max)
+          while (dataUrl.length > 38000 && quality > 0.35) {
+            quality -= 0.1;
+            dataUrl = canvas.toDataURL('image/jpeg', quality);
+          }
+          if (dataUrl.length <= 38000) break;
+          dim = Math.round(dim * 0.75);
         }
         resolve(dataUrl);
       };
