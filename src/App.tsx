@@ -55,7 +55,6 @@ import {
 import { AdminSettingsModal, AdminSettingsTab } from './components/AdminSettingsModal';
 import { BearGuideModal } from './components/BearGuideModal';
 import { DressingRoomModal } from './components/DressingRoomModal';
-import { AiBuddyDrawer } from './components/AiBuddyDrawer';
 import { CallPeerSummary, RemoteWatchModal } from './components/RemoteWatchModal';
 import {
   BillLineItem,
@@ -405,7 +404,6 @@ export default function App() {
   const [faqModalOpen, setFaqModalOpen] = useState(false);
   const [memberRewardsOpen, setMemberRewardsOpen] = useState(false);
   const [toolbarOrganizerOpen, setToolbarOrganizerOpen] = useState(false);
-  const [buddyOpen, setBuddyOpen] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [scanToast, setScanToast] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
@@ -1087,7 +1085,7 @@ export default function App() {
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName?.toLowerCase();
       if (tag === 'input' || tag === 'textarea') return;
-      if (checkoutState.step !== 'idle' || settingsOpen || guideOpen || dressingOpen || watchOpen || faqModalOpen || exitScannerOpen || toolbarOrganizerOpen || buddyOpen) return;
+      if (checkoutState.step !== 'idle' || settingsOpen || guideOpen || dressingOpen || watchOpen || faqModalOpen || exitScannerOpen || toolbarOrganizerOpen) return;
 
       const now = Date.now();
       if (now - lastKeyTime > 120) {
@@ -1110,7 +1108,7 @@ export default function App() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [viewScreen, currentUser, checkoutState.step, settingsOpen, guideOpen, dressingOpen, watchOpen, faqModalOpen, exitScannerOpen, toolbarOrganizerOpen, buddyOpen, handleBarcodeLookup]);
+  }, [viewScreen, currentUser, checkoutState.step, settingsOpen, guideOpen, dressingOpen, watchOpen, faqModalOpen, exitScannerOpen, toolbarOrganizerOpen, handleBarcodeLookup]);
 
   // Silent Void Logging for removing item / clearing bill
   const handleRemoveBillItem = (index: number) => {
@@ -1599,15 +1597,15 @@ export default function App() {
               );
             }}
             onClearCart={() => setMenuCart([])}
-            onSubmitOrderPayment={(method, deliveryInfo) => {
+            onSubmitOrderPayment={(_method, deliveryInfo) => {
               const total = menuCart.reduce((s, i) => s + i.price * i.qty, 0);
               const stars = menuCart.reduce((s, i) => s + i.stars * i.qty, 0);
               setCheckoutState({
-                step: method,
+                step: 'qr',
                 amount: total,
                 stars,
                 source: 'menu',
-                method: method === 'cash' ? 'เงินสด' : 'สแกน QR',
+                method: 'สแกน QR',
                 deliveryInfo,
               });
             }}
@@ -1623,14 +1621,6 @@ export default function App() {
           foodShopNameTh={foodShopNameTh}
           faqModalTitle={faqModalTitle}
           faqModalSubtitle={faqModalSubtitle}
-        />
-
-        <CashPaymentModal
-          isOpen={checkoutState.step === 'cash'}
-          amount={checkoutState.amount}
-          items={menuCart}
-          onClose={() => setCheckoutState((prev) => ({ ...prev, step: 'idle' }))}
-          onConfirmPaid={() => finalizeSalePayment()}
         />
 
         <QrPaymentModal
@@ -2343,7 +2333,6 @@ export default function App() {
                 method: 'สแกน QR',
               });
             }}
-            onOpenAiBuddy={() => setBuddyOpen(true)}
           />
         ) : (
           <CustomerMenuPOS
@@ -2388,15 +2377,15 @@ export default function App() {
               );
             }}
             onClearCart={() => setMenuCart([])}
-            onSubmitOrderPayment={(method, deliveryInfo) => {
+            onSubmitOrderPayment={(_method, deliveryInfo) => {
               const total = menuCart.reduce((s, i) => s + i.price * i.qty, 0);
               const stars = menuCart.reduce((s, i) => s + i.stars * i.qty, 0);
               setCheckoutState({
-                step: method,
+                step: 'qr',
                 amount: total,
                 stars,
                 source: 'menu',
-                method: method === 'cash' ? 'เงินสด' : 'สแกน QR',
+                method: 'สแกน QR',
                 deliveryInfo,
               });
             }}
@@ -2406,13 +2395,6 @@ export default function App() {
           />
         )}
       </main>
-
-      {/* AI Buddy Drawer (opened by tapping the 3 Bears above Amount Due) */}
-      <AiBuddyDrawer
-        staffName={activeUser.name}
-        isOpen={buddyOpen}
-        onClose={() => setBuddyOpen(false)}
-      />
 
       {/* Camera Barcode Scanner */}
       <BarcodeScannerModal

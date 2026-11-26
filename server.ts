@@ -15,6 +15,7 @@ const PORT = 3000;
 const ai = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY,
   httpOptions: {
+    timeout: 20000,
     headers: {
       'User-Agent': 'aistudio-build',
     },
@@ -65,6 +66,62 @@ function broadcastRoomState(roomId: string) {
   }
 }
 
+async function generateWithRetryAndFallback(params: {
+  contents: Parameters<typeof ai.models.generateContent>[0]['contents'];
+  config: NonNullable<Parameters<typeof ai.models.generateContent>[0]['config']>;
+}) {
+  // Try primary model with 15s cap, then fail over to flash-lite (minimal thinking) if busy/slow
+  const attempts: Array<{ model: string; backoffMs: number; timeoutMs: number; stripThinking?: boolean }> = [
+    { model: 'gemini-4-hydrogen', backoffMs: 300, timeoutMs: 15000 },
+    { model: 'gemini-3.1-flash-lite', backoffMs: 0, timeoutMs: 15000, stripThinking: true },
+  ];
+  let lastError: unknown = null;
+
+  for (const step of attempts) {
+    try {
+      const baseConfig = step.stripThinking
+        ? (({ thinkingConfig: _tc, ...rest }) => rest)(params.config)
+        : params.config;
+      return await ai.models.generateContent({
+        model: step.model,
+        contents: params.contents,
+        config: {
+          ...baseConfig,
+          abortSignal: AbortSignal.timeout(step.timeoutMs),
+        },
+      });
+    } catch (err) {
+      lastError = err;
+      const errName = err instanceof Error ? err.name : '';
+      const msg = `${errName} ${err instanceof Error ? err.message : String(err)}`.toLowerCase();
+      console.warn(`[Gemini] ${step.model} attempt failed:`, msg.slice(0, 240));
+      const isTransient =
+        msg.includes('503') ||
+        msg.includes('unavailable') ||
+        msg.includes('429') ||
+        msg.includes('resource_exhausted') ||
+        msg.includes('500') ||
+        msg.includes('502') ||
+        msg.includes('504') ||
+        msg.includes('404') ||
+        msg.includes('not_found') ||
+        msg.includes('abort') ||
+        msg.includes('timeout') ||
+        msg.includes('timed out') ||
+        msg.includes('econnreset') ||
+        msg.includes('fetch failed');
+      if (!isTransient) {
+        throw err;
+      }
+      if (step.backoffMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, step.backoffMs));
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '2mb' }));
@@ -79,83 +136,6 @@ async function startServer() {
       roomId,
       peers: getRoomPeersPayload(roomId),
     });
-  });
-
-  app.post('/api/ai-buddy', async (req, res) => {
-    try {
-      const { message, history = [], staffName = 'คุณแม่', lang = 'th' } = req.body as {
-        message?: string;
-        history?: Array<{ role: 'user' | 'model'; text: string }>;
-        staffName?: string;
-        lang?: 'th' | 'en';
-      };
-
-      if (!message || typeof message !== 'string' || !message.trim()) {
-        res.status(400).json({
-          error: lang === 'en' ? 'Please send a message to chat.' : 'กรุณาส่งข้อความที่ต้องการคุยค่ะ',
-        });
-        return;
-      }
-
-      if (!process.env.GEMINI_API_KEY) {
-        res.status(503).json({
-          error:
-            lang === 'en'
-              ? 'GEMINI_API_KEY is not configured in Settings > Secrets.'
-              : 'ยังไม่ได้ตั้งค่า GEMINI_API_KEY ใน Settings > Secrets ของระบบค่ะ',
-        });
-        return;
-      }
-
-      const conversationContext = history
-        .slice(-6)
-        .map((m) => `${m.role === 'user' ? staffName : 'Bear Helper'}: ${m.text}`)
-        .join('\n');
-
-      const prompt = conversationContext
-        ? `${conversationContext}\n${staffName}: ${message.trim()}`
-        : message.trim();
-
-      const systemInstruction =
-        lang === 'en'
-          ? `You are "Little Bear Helper" at the shop "kookkikpaplern". You are a warm, cheerful, gentle grandchild/helper chatting with "${staffName}" while tending the shop.
-Guidelines:
-- Speak polite, warm, friendly English suitable for reading aloud naturally.
-- Keep answers concise (2-4 short sentences) so text-to-speech sounds pleasant and clear.
-- Avoid markdown formatting like ** and do NOT use any emojis or pictographs in your reply (plain text only).
-- Share positive encouragement, light cheerful stories, or gentle humor.`
-          : `คุณคือ "น้องหมีผู้ช่วย" ของร้าน "กุ๊กกิ๊กพาเพลิน (kookkikpaplern)" เป็นหลานสาว/หลานชายที่น่ารัก อบอุ่น อ่อนโยน และอารมณ์ดี คอยคุยแก้เหงาและเป็นกำลังใจให้ "${staffName}" (เช่น คุณแม่ หรือพี่สาว) ระหว่างเฝ้าร้านขายของ
-แนวทางการตอบ:
-- พูดภาษาไทยสุภาพ อบอุ่น เป็นกันเอง เหมือนลูกหลานคุยกับคุณแม่ (ลงท้าย ค่ะ/นะคะ อย่างเป็นธรรมชาติ)
-- ตอบกระชับ อ่านง่าย ความยาวประมาณ 2-4 ประโยค เพื่อให้อ่านออกเสียงฟังสบายไม่ยาวเกินไป
-- หลีกเลี่ยงการใช้สัญลักษณ์โค้ด มาร์กดาวน์ตัวหนา ** และห้ามใช้อิโมจิหรือสัญลักษณ์รูปภาพใดๆ ในคำตอบโดยเด็ดขาด (ตอบเป็นข้อความตัวอักษรล้วน)
-- ให้กำลังใจเชิงบวก เล่าเรื่องน่ารักๆ หรือมุกอารมณ์ดีเบาๆ ที่เหมาะกับผู้ใหญ่`;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
-        contents: prompt,
-        config: {
-          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
-          systemInstruction,
-        },
-      });
-
-      const rawReply = response.text?.trim() || '';
-      const reply = rawReply
-        .replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, '')
-        .replace(/[ \t]{2,}/g, ' ')
-        .trim();
-      if (!reply) {
-        res.status(502).json({ error: 'ผู้ช่วยไม่สามารถตอบกลับได้ในขณะนี้ ลองใหม่อีกครั้งนะคะ' });
-        return;
-      }
-
-      res.json({ reply });
-    } catch (err) {
-      console.error('AI Buddy error:', err);
-      const errMsg = err instanceof Error ? err.message : 'เกิดข้อผิดพลาดในการเชื่อมต่อผู้ช่วย AI';
-      res.status(500).json({ error: errMsg });
-    }
   });
 
   app.post('/api/verify-product-image', async (req, res) => {
@@ -205,8 +185,7 @@ Guidelines:
 
       const [, mimeType, base64Data] = match;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-4-hydrogen',
+      const response = await generateWithRetryAndFallback({
         contents: {
           parts: [
             {

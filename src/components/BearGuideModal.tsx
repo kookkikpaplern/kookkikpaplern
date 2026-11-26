@@ -55,14 +55,7 @@ export const BearGuideModal: React.FC<BearGuideModalProps> = ({ isOpen, onClose,
       ),
     },
     {
-      title: tx('6. น้องหมีผู้ช่วย AI คลายเหงา', '6. Friendly Bear Helper Chat'),
-      body: tx(
-        'ถ้าระหว่างเฝ้าร้านรู้สึกเหงาหรืออยากได้กำลังใจ กดปุ่ม "คุยกับผู้ช่วย" มุมซ้ายล่าง พูดใส่ไมค์หรือจิ้มคำถามได้เลย น้องหมีจะคอยตอบและอ่านออกเสียงให้ฟังค่ะ',
-        'Tap the "Bear Buddy" button in the bottom-left corner anytime for encouragement or a quick chat! You can type, tap preset prompts, or use the mic and listen to spoken replies.'
-      ),
-    },
-    {
-      title: tx('7. วิดีโอคอลเฝ้าร้านแทนแม่ (เมื่อแม่พักหรือเข้าห้องน้ำ)', '7. Remote Shop Video Call (Cover for Mom)'),
+      title: tx('6. วิดีโอคอลเฝ้าร้านแทนแม่ (เมื่อแม่พักหรือเข้าห้องน้ำ)', '6. Remote Shop Video Call (Cover for Mom)'),
       body: tx(
         'หากคุณแม่ต้องเข้าห้องน้ำหรือพักสักครู่ กดปุ่ม "เฝ้าร้านแทนแม่" บนแถบเครื่องมือ แล้วเลือก "เปิดเคาน์เตอร์รอให้ลูกเฝ้าร้าน" จากนั้นลูกหรือคนในครอบครัวเปิดเว็บนี้จากมือถืออีกเครื่อง กดเข้าเฝ้าร้านแทน เพื่อเห็นหน้าคุยกับลูกค้าและส่ง QR พร้อมเพย์ให้ลูกค้าสแกนจ่ายได้ทันทีค่ะ',
         'When Mom needs a break, tap "Video Call Shop" on the toolbar and open Shop Counter Standby. Family members can then join from their phone to talk with customers live and push PromptPay QR to the counter screen.'

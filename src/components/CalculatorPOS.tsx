@@ -38,7 +38,6 @@ interface CalculatorPOSProps {
   onOpenScanner: () => void;
   onOpenCashModal: (total: number) => void;
   onOpenQrModal: (total: number) => void;
-  onOpenAiBuddy?: () => void;
 }
 
 type CalcOp = '+' | '-' | '×' | '÷';
@@ -52,7 +51,6 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
   onOpenScanner,
   onOpenCashModal,
   onOpenQrModal,
-  onOpenAiBuddy,
 }) => {
   const { lang, tx } = useLang();
   const [inputValue, setInputValue] = useState('0');
@@ -863,46 +861,10 @@ export const CalculatorPOS: React.FC<CalculatorPOSProps> = ({
           )}
         </div>
 
-        {/* Payment Box with 3 Bears Clinging on Top Edge (Tap Bears to Chat with Helper) */}
-        <div className="pt-1">
-          <div className="-mb-3.5 relative z-10 px-4 flex flex-col items-center">
-            <button
-              type="button"
-              onClick={() => {
-                playSoftClick();
-                onOpenAiBuddy?.();
-              }}
-              className="group flex flex-col items-center cursor-pointer transition-transform hover:-translate-y-0.5 active:scale-[0.98] focus:outline-none"
-              aria-label={tx(
-                'คุยกับผู้ช่วย: วันนี้มีเรื่องอะไร อยากถามไหมคะ',
-                'Open Helper: Anything you would like to ask today?'
-              )}
-              title={tx('แตะที่น้องหมีเพื่อคุยกับผู้ช่วยค่ะ', 'Tap the bears to talk to Smart Helper')}
-            >
-              {/* Speech Bubble Above the 3 Bears' Heads */}
-              <div className="relative mb-1.5">
-                <div
-                  className="px-4 py-1.5 rounded-2xl border-2 shadow-sm text-xs sm:text-sm font-bold tracking-tight transition-colors group-hover:shadow-md"
-                  style={{
-                    backgroundColor: 'var(--bg-card)',
-                    borderColor: 'var(--accent-border)',
-                    color: 'var(--accent-text)',
-                  }}
-                >
-                  {tx('วันนี้มีเรื่องอะไร อยากถามไหมคะ', "Anything you'd like to ask today?")}
-                </div>
-                <span
-                  aria-hidden="true"
-                  className="block w-3 h-3 rotate-45 border-r-2 border-b-2 mx-auto -mt-1.5"
-                  style={{
-                    backgroundColor: 'var(--bg-card)',
-                    borderColor: 'var(--accent-border)',
-                  }}
-                />
-              </div>
-
-              <BearGangMascot pose="peeking" outfits={outfits} />
-            </button>
+        {/* Payment Box with 3 Bears Clinging on Top Edge */}
+        <div className="pt-2">
+          <div className="-mb-3.5 relative z-10 px-4">
+            <BearGangMascot pose="peeking" outfits={outfits} />
           </div>
 
           <div

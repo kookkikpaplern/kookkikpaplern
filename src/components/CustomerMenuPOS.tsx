@@ -1,6 +1,5 @@
 import React, { useMemo, useState } from 'react';
 import {
-  Banknote,
   Check,
   CheckCircle2,
   Coffee,
@@ -45,7 +44,7 @@ interface CustomerMenuPOSProps {
   onChangeQty: (itemId: string, delta: number) => void;
   onClearCart: () => void;
   onSubmitOrderPayment: (
-    method: 'cash' | 'qr',
+    method: 'qr',
     deliveryInfo: {
       deliveryType: 'ทานนี้' | 'กลับบ้าน' | 'รับเองที่ร้าน' | 'ให้พ่อไปส่ง';
       tableNumber?: string;
@@ -665,7 +664,7 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                 </div>
 
                 {(() => {
-                  const handlePayClick = (method: 'cash' | 'qr') => {
+                  const handlePayClick = () => {
                     if (!isMerchantView) {
                       if (deliveryType === 'ทานนี้' && !tableNumber.trim()) {
                         setOrderFormError(
@@ -699,7 +698,7 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                       }
                     }
                     setOrderFormError('');
-                    onSubmitOrderPayment(method, {
+                    onSubmitOrderPayment('qr', {
                       deliveryType,
                       tableNumber: deliveryType === 'ทานนี้' ? tableNumber.trim() : undefined,
                       customerName,
@@ -708,30 +707,31 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                   };
 
                   return (
-                    <div className="grid grid-cols-2 gap-2.5">
-                      <button
-                        type="button"
-                        disabled={cartTotal <= 0 || !onlineOrderEnabled}
-                        onClick={() => handlePayClick('cash')}
-                        className="h-14 rounded-2xl font-bold text-white flex items-center justify-center gap-2 cursor-pointer disabled:opacity-45 transition-transform active:scale-95"
-                        style={{ backgroundColor: 'var(--accent-primary)' }}
-                      >
-                        <Banknote className="w-5 h-5" />
-                        {tx('เงินสด', 'Cash')}
-                      </button>
-                      <button
-                        type="button"
-                        disabled={cartTotal <= 0 || !onlineOrderEnabled}
-                        onClick={() => handlePayClick('qr')}
-                        className="h-14 rounded-2xl border font-bold flex items-center justify-center gap-2 cursor-pointer disabled:opacity-45 transition-transform active:scale-95"
+                    <div className="space-y-2">
+                      <p
+                        className="text-[11px] font-semibold text-center rounded-xl px-2.5 py-1.5 border"
                         style={{
                           backgroundColor: 'var(--pastel-blue)',
                           borderColor: 'var(--border-soft)',
                           color: 'var(--pastel-blue-text)',
                         }}
                       >
+                        {tx(
+                          'รับชำระผ่านการสแกน QR เท่านั้น',
+                          'QR scan payment only'
+                        )}
+                      </p>
+                      <button
+                        type="button"
+                        disabled={cartTotal <= 0 || !onlineOrderEnabled}
+                        onClick={handlePayClick}
+                        className="w-full h-14 rounded-2xl font-bold text-white flex items-center justify-center gap-2 cursor-pointer disabled:opacity-45 transition-transform active:scale-95"
+                        style={{
+                          backgroundColor: 'var(--accent-primary)',
+                        }}
+                      >
                         <QrCode className="w-5 h-5" />
-                        {tx('สแกน QR', 'Scan QR')}
+                        {tx('สแกนจ่าย QR', 'Scan QR')}
                       </button>
                     </div>
                   );
