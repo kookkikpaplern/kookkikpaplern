@@ -33,6 +33,8 @@ export interface CustomerQueueOrder {
   customerName?: string;
   dropPoint?: string;
   slipImageUrl?: string;
+  slip_url?: string;
+  supabaseOrderId?: string | number;
   slipVerifyStatus?: 'verified' | 'unverified' | 'manual_line';
   slipDetectedAmount?: number;
   slipTransactionRef?: string;

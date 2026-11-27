@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Check,
   CheckCircle2,
+  Clock,
   Coffee,
   Copy,
   ExternalLink,
@@ -32,6 +33,7 @@ import {
   useLang,
 } from '../config/i18n';
 import { BillLineItem, CustomerQueueOrder } from '../utils/sheetsSync';
+import { isSafeHttpUrl } from '../utils/supabaseClient';
 import {
   buildLineOrderText,
   buildLineSendHref,
@@ -86,6 +88,18 @@ function isDrinkOrSnackCategory(category: string): boolean {
   );
 }
 
+function getSafeSlipSrc(order: CustomerQueueOrder): string {
+  const candidates = [order.slip_url, order.slipImageUrl];
+  for (const raw of candidates) {
+    if (!raw || typeof raw !== 'string') continue;
+    const trimmed = raw.trim();
+    if (isSafeHttpUrl(trimmed) || trimmed.startsWith('data:image/')) {
+      return trimmed;
+    }
+  }
+  return '';
+}
+
 export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
   menuItems,
   rewardNotice,
@@ -127,6 +141,7 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
   const [customNote, setCustomNote] = useState<string>('');
   const [modalQty, setModalQty] = useState<number>(1);
   const [previewOrder, setPreviewOrder] = useState<CustomerQueueOrder | null>(null);
+  const [slipLoadError, setSlipLoadError] = useState(false);
   const [isRefreshingOrders, setIsRefreshingOrders] = useState(false);
   const [lineCopiedNotice, setLineCopiedNotice] = useState(false);
   const [lineQrModalOpen, setLineQrModalOpen] = useState(false);
@@ -1059,123 +1074,138 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
               </p>
             ) : (
               <div className="space-y-2.5 max-h-72 overflow-y-auto pr-0.5">
-                {sortedActiveQueue.map((q) => (
-                  <div
-                    key={q.orderId}
-                    className="rounded-2xl border p-3 space-y-2"
-                    style={{
-                      backgroundColor: q.queueNo === sortedActiveQueue[0]?.queueNo ? 'var(--accent-soft)' : 'var(--bg-canvas)',
-                      borderColor: q.slipImageUrl && !q.accepted ? '#16A34A' : 'var(--border-soft)',
-                    }}
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <p className="text-sm font-bold" style={{ color: 'var(--text-main)' }}>
-                            {tx(`คิวที่ ${q.queueNo}`, `Queue #${q.queueNo}`)} · {translateDeliveryType(q.deliveryType, lang)}
-                          </p>
-                          {isMerchantView && (q.tableNumber || (q.deliveryType === 'ทานนี้' && q.dropPoint)) && (
-                            <span
-                              className="inline-flex items-center px-2 py-0.5 rounded-lg text-[11px] font-bold font-num"
-                              style={{ backgroundColor: 'var(--accent-primary)', color: '#FFFFFF' }}
-                            >
-                              {q.tableNumber ? tx(`โต๊ะที่ ${q.tableNumber}`, `Table ${q.tableNumber}`) : q.dropPoint}
+                {sortedActiveQueue.map((q) => {
+                  const slipSrc = getSafeSlipSrc(q);
+                  const createdLabel = q.createdAt
+                    ? new Date(q.createdAt).toLocaleTimeString(lang === 'en' ? 'en-US' : 'th-TH', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })
+                    : '';
+                  return (
+                    <div
+                      key={q.orderId}
+                      className="rounded-2xl border p-3 space-y-2"
+                      style={{
+                        backgroundColor: q.queueNo === sortedActiveQueue[0]?.queueNo ? 'var(--accent-soft)' : 'var(--bg-canvas)',
+                        borderColor: slipSrc && !q.accepted ? '#16A34A' : 'var(--border-soft)',
+                      }}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <p className="text-sm font-bold" style={{ color: 'var(--text-main)' }}>
+                              {tx(`คิวที่ ${q.queueNo}`, `Queue #${q.queueNo}`)} · {translateDeliveryType(q.deliveryType, lang)}
+                            </p>
+                            {isMerchantView && (q.tableNumber || (q.deliveryType === 'ทานนี้' && q.dropPoint)) && (
+                              <span
+                                className="inline-flex items-center px-2 py-0.5 rounded-lg text-[11px] font-bold font-num"
+                                style={{ backgroundColor: 'var(--accent-primary)', color: '#FFFFFF' }}
+                              >
+                                {q.tableNumber ? tx(`โต๊ะที่ ${q.tableNumber}`, `Table ${q.tableNumber}`) : q.dropPoint}
+                              </span>
+                            )}
+                            <span className="font-num text-xs font-extrabold" style={{ color: 'var(--accent-text)' }}>
+                              ฿{q.totalAmount.toLocaleString('th-TH')}
                             </span>
-                          )}
-                          <span className="font-num text-xs font-extrabold" style={{ color: 'var(--accent-text)' }}>
-                            ฿{q.totalAmount.toLocaleString('th-TH')}
-                          </span>
-                        </div>
+                            {createdLabel && (
+                              <span className="inline-flex items-center gap-0.5 text-[11px] font-num" style={{ color: 'var(--text-muted)' }}>
+                                <Clock className="w-3 h-3" />
+                                {createdLabel}
+                              </span>
+                            )}
+                          </div>
 
-                        {/* Status Badges: Slip Verification + Acceptance */}
-                        <div className="flex flex-wrap items-center gap-1.5 mt-1">
-                          {q.slipVerifyStatus === 'verified' ? (
-                            <span
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
-                              style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
-                            >
-                              <ShieldCheck className="w-3 h-3" />
-                              {tx(
-                                `AI ตรวจสลิปตรงยอด ฿${(q.slipDetectedAmount || q.totalAmount).toLocaleString('th-TH')}`,
-                                `AI Matched ฿${(q.slipDetectedAmount || q.totalAmount).toLocaleString('en-US')}`
-                              )}
-                            </span>
-                          ) : q.slipImageUrl ? (
-                            <span
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
-                              style={{ backgroundColor: '#FEF3C7', color: '#92400E' }}
-                            >
-                              <AlertTriangle className="w-3 h-3" />
-                              {tx('แนบสลิปแล้ว (รอร้านตรวจยอด)', 'Slip Attached (Verify Manually)')}
-                            </span>
-                          ) : q.slipVerifyStatus === 'manual_line' ? (
-                            <span
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
-                              style={{ backgroundColor: '#FEF3C7', color: '#92400E' }}
-                            >
-                              <AlertTriangle className="w-3 h-3" />
-                              {tx('ส่งสลิปทาง LINE (ตรวจก่อนรับ)', 'LINE Slip (Verify First)')}
-                            </span>
-                          ) : null}
-                          {q.accepted ? (
-                            <span
-                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
-                              style={{ backgroundColor: 'var(--pastel-blue)', color: 'var(--pastel-blue-text)' }}
-                            >
-                              <Check className="w-3 h-3" />
-                              {tx('รับออเดอร์แล้ว', 'Accepted')}
-                            </span>
-                          ) : (
-                            <span
-                              className="inline-flex items-center px-2 py-0.5 rounded-lg text-[11px] font-bold"
-                              style={{ backgroundColor: 'var(--pastel-peach)', color: 'var(--pastel-peach-text)' }}
-                            >
-                              {tx('รอร้านกดรับ', 'Pending Accept')}
-                            </span>
-                          )}
-                        </div>
+                          {/* Status Badges: Slip Verification + Acceptance */}
+                          <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                            {q.slipVerifyStatus === 'verified' ? (
+                              <span
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                                style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
+                              >
+                                <ShieldCheck className="w-3 h-3" />
+                                {tx(
+                                  `AI ตรวจสลิปตรงยอด ฿${(q.slipDetectedAmount || q.totalAmount).toLocaleString('th-TH')}`,
+                                  `AI Matched ฿${(q.slipDetectedAmount || q.totalAmount).toLocaleString('en-US')}`
+                                )}
+                              </span>
+                            ) : slipSrc ? (
+                              <span
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                                style={{ backgroundColor: '#FEF3C7', color: '#92400E' }}
+                              >
+                                <AlertTriangle className="w-3 h-3" />
+                                {tx('แนบสลิปแล้ว (รอร้านตรวจยอด)', 'Slip Attached (Verify Manually)')}
+                              </span>
+                            ) : q.slipVerifyStatus === 'manual_line' ? (
+                              <span
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                                style={{ backgroundColor: '#FEF3C7', color: '#92400E' }}
+                              >
+                                <AlertTriangle className="w-3 h-3" />
+                                {tx('ส่งสลิปทาง LINE (ตรวจก่อนรับ)', 'LINE Slip (Verify First)')}
+                              </span>
+                            ) : null}
+                            {q.accepted ? (
+                              <span
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                                style={{ backgroundColor: 'var(--pastel-blue)', color: 'var(--pastel-blue-text)' }}
+                              >
+                                <Check className="w-3 h-3" />
+                                {tx('รับออเดอร์แล้ว', 'Accepted')}
+                              </span>
+                            ) : (
+                              <span
+                                className="inline-flex items-center px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                                style={{ backgroundColor: 'var(--pastel-peach)', color: 'var(--pastel-peach-text)' }}
+                              >
+                                {tx('รอร้านกดรับ', 'Pending Accept')}
+                              </span>
+                            )}
+                          </div>
 
-                        {isMerchantView && (q.customerName || (q.dropPoint && !q.tableNumber)) && (
-                          <p className="text-xs mt-1 font-medium" style={{ color: 'var(--accent-text)' }}>
-                            {q.customerName} {q.dropPoint && !q.tableNumber ? `(${q.dropPoint})` : ''}
+                          {isMerchantView && (q.customerName || (q.dropPoint && !q.tableNumber)) && (
+                            <p className="text-xs mt-1 font-medium" style={{ color: 'var(--accent-text)' }}>
+                              {q.customerName} {q.dropPoint && !q.tableNumber ? `(${q.dropPoint})` : ''}
+                            </p>
+                          )}
+                          <p className="text-xs mt-1 line-clamp-2" style={{ color: 'var(--text-muted)' }}>
+                            {q.items
+                              .map(
+                                (i) =>
+                                  `${translateMenuName(i.name, lang)}${
+                                    i.tasteNote ? ` (${translateTasteNote(i.tasteNote, lang)})` : ''
+                                  } ×${i.qty}`
+                              )
+                              .join(', ')}
                           </p>
-                        )}
-                        <p className="text-xs mt-1 line-clamp-2" style={{ color: 'var(--text-muted)' }}>
-                          {q.items
-                            .map(
-                              (i) =>
-                                `${translateMenuName(i.name, lang)}${
-                                  i.tasteNote ? ` (${translateTasteNote(i.tasteNote, lang)})` : ''
-                                } ×${i.qty}`
-                            )
-                            .join(', ')}
-                        </p>
+                        </div>
                       </div>
-                    </div>
 
-                    {/* Action Row: Prominent View Slip (Merchant Only) + Merchant Accept / Done */}
-                    {isMerchantView && (
-                      <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t" style={{ borderColor: 'var(--border-soft)' }}>
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          {q.slipImageUrl && (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                playSoftClick();
-                                setPreviewOrder(q);
-                              }}
-                              className="px-2.5 py-1.5 rounded-xl border text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
-                              style={{
-                                backgroundColor: 'var(--bg-card)',
-                                borderColor: 'var(--accent-primary)',
-                                color: 'var(--accent-text)',
-                              }}
-                            >
-                              <Eye className="w-3.5 h-3.5" />
-                              {tx('ดูรูปสลิป', 'View Slip')}
-                            </button>
-                          )}
-                        </div>
+                      {/* Action Row: Prominent View Slip (Merchant Only) + Merchant Accept / Done */}
+                      {isMerchantView && (
+                        <div className="flex flex-wrap items-center justify-between gap-2 pt-1.5 border-t" style={{ borderColor: 'var(--border-soft)' }}>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {slipSrc && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  playSoftClick();
+                                  setSlipLoadError(false);
+                                  setPreviewOrder(q);
+                                }}
+                                className="px-3 py-1.5 rounded-xl border-2 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer shadow-xs transition-transform active:scale-95"
+                                style={{
+                                  backgroundColor: '#EFF6FF',
+                                  borderColor: '#2563EB',
+                                  color: '#1D4ED8',
+                                }}
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                                {tx('ดูสลิป (Slip)', 'View Slip')}
+                              </button>
+                            )}
+                          </div>
 
                         <div className="flex items-center gap-1.5 ml-auto">
                           {!q.accepted && onAcceptQueueOrder && (
@@ -1202,10 +1232,11 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                             {tx('ส่งแล้ว', 'Done')}
                           </button>
                         </div>
-                      </div>
-                    )}
-                  </div>
-                ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1421,14 +1452,14 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
         </div>
       )}
 
-      {/* Modal ตรวจสอบรูปสลิปโอนเงินขนาดชัดเจนพร้อมข้อมูลออเดอร์ */}
-      {isMerchantView && previewOrder && previewOrder.slipImageUrl && (
+      {/* Modal ตรวจสอบรูปสลิปโอนเงินขนาดชัดเจนพร้อมยอดเงินและเวลาโอน */}
+      {isMerchantView && previewOrder && getSafeSlipSrc(previewOrder) && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-sm p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4"
           onClick={() => setPreviewOrder(null)}
         >
           <div
-            className="w-full max-w-md rounded-3xl border shadow-2xl overflow-hidden flex flex-col max-h-[92vh]"
+            className="w-full max-w-lg rounded-3xl border shadow-2xl overflow-hidden flex flex-col max-h-[92vh]"
             style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
             onClick={(e) => e.stopPropagation()}
           >
@@ -1436,22 +1467,25 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
               className="flex items-center justify-between px-5 py-3.5 border-b shrink-0"
               style={{ borderColor: 'var(--border-soft)' }}
             >
-              <div>
+              <div className="min-w-0">
                 <h4 className="font-bold text-base flex items-center gap-1.5" style={{ color: 'var(--text-main)' }}>
-                  <FileImage className="w-4 h-4" style={{ color: 'var(--accent-primary)' }} />
+                  <FileImage className="w-4 h-4 shrink-0" style={{ color: 'var(--accent-primary)' }} />
                   {tx('ตรวจสอบหลักฐานสลิปโอนเงิน', 'Verify Transfer Slip')}
                 </h4>
-                <p className="text-xs" style={{ color: 'var(--text-muted)' }}>
-                  {tx(`คิวที่ ${previewOrder.queueNo}`, `Queue #${previewOrder.queueNo}`)} · #{previewOrder.orderId} ·{' '}
-                  <span className="font-num font-bold" style={{ color: 'var(--accent-text)' }}>
-                    ฿{previewOrder.totalAmount.toLocaleString('th-TH')}
-                  </span>
+                <p className="text-xs truncate" style={{ color: 'var(--text-muted)' }}>
+                  {tx(`คิวที่ ${previewOrder.queueNo}`, `Queue #${previewOrder.queueNo}`)} · #{previewOrder.orderId}
+                  {previewOrder.createdAt
+                    ? ` · ${new Date(previewOrder.createdAt).toLocaleString(lang === 'en' ? 'en-US' : 'th-TH', {
+                        dateStyle: 'short',
+                        timeStyle: 'short',
+                      })}`
+                    : ''}
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setPreviewOrder(null)}
-                className="w-9 h-9 rounded-xl border flex items-center justify-center cursor-pointer"
+                className="w-9 h-9 rounded-xl border flex items-center justify-center cursor-pointer shrink-0"
                 style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
                 aria-label={tx('ปิดหน้าต่าง', 'Close')}
               >
@@ -1459,22 +1493,82 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
               </button>
             </div>
 
-            <div className="p-4 flex justify-center bg-stone-50 overflow-y-auto">
-              <img
-                src={previewOrder.slipImageUrl}
-                alt={tx('สลิปโอนเงินลูกค้า', 'Customer transfer slip')}
-                className="max-h-[62vh] w-auto rounded-2xl object-contain border border-stone-200 shadow-sm"
-              />
+            {/* Amount & Transfer Time Verification Strip */}
+            <div
+              className="grid grid-cols-2 gap-2 px-4 py-2.5 border-b shrink-0"
+              style={{ backgroundColor: 'var(--accent-soft)', borderColor: 'var(--border-soft)' }}
+            >
+              <div className="rounded-xl bg-white/85 px-3 py-1.5 border" style={{ borderColor: 'var(--border-soft)' }}>
+                <p className="text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+                  {tx('ยอดเงินที่ต้องโอน', 'Order Total')}
+                </p>
+                <p className="font-num text-lg font-extrabold" style={{ color: 'var(--accent-text)' }}>
+                  ฿{previewOrder.totalAmount.toLocaleString('th-TH', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                </p>
+              </div>
+              <div className="rounded-xl bg-white/85 px-3 py-1.5 border" style={{ borderColor: 'var(--border-soft)' }}>
+                <p className="text-[11px] font-semibold" style={{ color: 'var(--text-muted)' }}>
+                  {tx('เวลาส่งออเดอร์ / เวลาโอน', 'Submitted / Transfer Time')}
+                </p>
+                <p className="font-num text-xs sm:text-sm font-bold mt-0.5" style={{ color: 'var(--text-main)' }}>
+                  {previewOrder.createdAt
+                    ? new Date(previewOrder.createdAt).toLocaleString(lang === 'en' ? 'en-US' : 'th-TH', {
+                        day: '2-digit',
+                        month: 'short',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })
+                    : '-'}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-4 flex flex-col items-center justify-center bg-stone-100 overflow-y-auto flex-1 min-h-0">
+              {!slipLoadError ? (
+                <img
+                  src={getSafeSlipSrc(previewOrder)}
+                  alt={tx('สลิปโอนเงินลูกค้า', 'Customer transfer slip')}
+                  onError={() => setSlipLoadError(true)}
+                  className="max-h-[56vh] w-auto max-w-full rounded-2xl object-contain border border-stone-200 bg-white shadow-md"
+                />
+              ) : (
+                <div className="rounded-2xl border bg-white p-5 text-center space-y-2 max-w-sm">
+                  <AlertTriangle className="w-7 h-7 mx-auto text-amber-600" />
+                  <p className="text-xs font-bold" style={{ color: 'var(--text-main)' }}>
+                    {tx(
+                      'ไม่สามารถโหลดรูปสลิปในหน้าต่างนี้ได้ (โปรดตรวจสิทธิ์ public ของ bucket "slips")',
+                      'Unable to preview slip image directly (check "slips" bucket public read policy)'
+                    )}
+                  </p>
+                </div>
+              )}
+
+              {previewOrder.slip_url && isSafeHttpUrl(previewOrder.slip_url) && (
+                <a
+                  href={previewOrder.slip_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-xl border bg-white text-xs font-bold hover:opacity-85"
+                  style={{ borderColor: 'var(--border-soft)', color: '#1D4ED8' }}
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  {tx('เปิดรูปสลิปเต็มจอ (Supabase Storage)', 'Open Full Slip URL')}
+                </a>
+              )}
             </div>
 
             <div
               className="p-4 border-t space-y-2.5 shrink-0"
               style={{ borderColor: 'var(--border-soft)', backgroundColor: 'var(--bg-canvas)' }}
             >
-              <div className="flex items-center justify-between gap-2 text-xs">
-                <span style={{ color: 'var(--text-muted)' }}>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="font-semibold" style={{ color: 'var(--text-main)' }}>
                   {previewOrder.customerName || translateDeliveryType(previewOrder.deliveryType, lang)}
-                  {previewOrder.dropPoint ? ` (${previewOrder.dropPoint})` : ''}
+                  {previewOrder.tableNumber
+                    ? ` · ${tx(`โต๊ะที่ ${previewOrder.tableNumber}`, `Table ${previewOrder.tableNumber}`)}`
+                    : previewOrder.dropPoint
+                      ? ` (${previewOrder.dropPoint})`
+                      : ''}
                 </span>
                 {previewOrder.slipVerifyStatus === 'verified' ? (
                   <span
@@ -1490,10 +1584,24 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                     style={{ backgroundColor: '#FEF3C7', color: '#92400E' }}
                   >
                     <AlertTriangle className="w-3 h-3" />
-                    {tx('โปรดตรวจยอดเงินเข้าบัญชีก่อนรับ', 'Verify Bank Balance First')}
+                    {tx('โปรดตรวจยอดเงินและเวลาในสลิปก่อนรับ', 'Verify Slip Amount & Time First')}
                   </span>
                 )}
               </div>
+
+              {previewOrder.items.length > 0 && (
+                <p className="text-[11px] line-clamp-2" style={{ color: 'var(--text-muted)' }}>
+                  {previewOrder.items
+                    .map(
+                      (it) =>
+                        `${translateMenuName(it.name, lang)}${
+                          it.tasteNote ? ` (${translateTasteNote(it.tasteNote, lang)})` : ''
+                        } ×${it.qty}`
+                    )
+                    .join(', ')}
+                </p>
+              )}
+
               {previewOrder.slipVerifyNote && (
                 <p className="text-[11px] font-medium" style={{ color: 'var(--text-muted)' }}>
                   {previewOrder.slipVerifyNote}
@@ -1521,7 +1629,7 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                     style={{ backgroundColor: '#16A34A' }}
                   >
                     <CheckCircle2 className="w-4 h-4" />
-                    {tx('สลิปถูกต้อง · กดรับออเดอร์ ✓', 'Slip Valid · Accept Order ✓')}
+                    {tx('สลิปถูกต้อง · ยืนยันรับออเดอร์ ✓', 'Slip Valid · Confirm & Accept ✓')}
                   </button>
                 </div>
               ) : (

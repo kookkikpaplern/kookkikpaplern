@@ -90,8 +90,12 @@ import {
 } from './utils/sound';
 import { SharedShopConfigPayload, useRealtimeShopSync } from './utils/realtimeSync';
 import {
+  fetchOrdersFromSupabase,
   insertOrderToSupabase,
+  isSafeHttpUrl,
+  mapSupabaseOrderToQueueOrder,
   SupabaseOrderItem,
+  updateOrderStatusInSupabase,
   uploadSlipToSupabase,
 } from './utils/supabaseClient';
 
@@ -832,26 +836,54 @@ export default function App() {
     (incomingList: CustomerQueueOrder[], shouldRingOnNew = false) => {
       let brandNewToRing: CustomerQueueOrder | null = null;
       for (const inc of incomingList) {
-        if (!knownOrderIdsRef.current.has(inc.orderId)) {
-          knownOrderIdsRef.current.add(inc.orderId);
-          if (shouldRingOnNew && inc.status === 'กำลังทำ' && !inc.accepted) {
-            brandNewToRing = inc;
-          }
+        const sbKey = inc.supabaseOrderId != null ? `sb:${String(inc.supabaseOrderId)}` : '';
+        const alreadyKnown =
+          knownOrderIdsRef.current.has(inc.orderId) ||
+          (sbKey ? knownOrderIdsRef.current.has(sbKey) : false);
+        knownOrderIdsRef.current.add(inc.orderId);
+        if (sbKey) knownOrderIdsRef.current.add(sbKey);
+        if (!alreadyKnown && shouldRingOnNew && inc.status === 'กำลังทำ' && !inc.accepted) {
+          brandNewToRing = inc;
         }
       }
       setQueueOrders((prev) => {
         const byId = new Map(prev.map((q) => [q.orderId, q]));
+        const findKeyBySupabaseId = (sbId?: string | number): string | undefined => {
+          if (sbId == null) return undefined;
+          const target = String(sbId);
+          for (const [k, v] of byId.entries()) {
+            if (v.supabaseOrderId != null && String(v.supabaseOrderId) === target) {
+              return k;
+            }
+          }
+          return undefined;
+        };
+
         for (const incoming of incomingList) {
-          const existing = byId.get(incoming.orderId);
-          if (!existing) {
+          const matchedKey =
+            (byId.has(incoming.orderId) ? incoming.orderId : undefined) ||
+            findKeyBySupabaseId(incoming.supabaseOrderId);
+          const existing = matchedKey ? byId.get(matchedKey) : undefined;
+          if (!existing || !matchedKey) {
             byId.set(incoming.orderId, incoming);
           } else {
-            byId.set(incoming.orderId, {
+            byId.set(matchedKey, {
               ...incoming,
+              orderId: existing.orderId,
+              queueNo: existing.queueNo || incoming.queueNo,
+              supabaseOrderId: existing.supabaseOrderId ?? incoming.supabaseOrderId,
+              items: existing.items.length > 0 ? existing.items : incoming.items,
+              deliveryType: existing.deliveryType || incoming.deliveryType,
+              tableNumber: existing.tableNumber || incoming.tableNumber,
+              customerName: existing.customerName || incoming.customerName,
+              dropPoint: existing.dropPoint || incoming.dropPoint,
               accepted: existing.accepted || incoming.accepted,
               status: existing.status === 'เสร็จแล้ว' ? 'เสร็จแล้ว' : incoming.status,
+              slip_url: existing.slip_url || incoming.slip_url,
               slipImageUrl: existing.slipImageUrl || incoming.slipImageUrl,
-              tableNumber: existing.tableNumber || incoming.tableNumber,
+              slipVerifyStatus: existing.slipVerifyStatus || incoming.slipVerifyStatus,
+              slipDetectedAmount: existing.slipDetectedAmount || incoming.slipDetectedAmount,
+              slipVerifyNote: existing.slipVerifyNote || incoming.slipVerifyNote,
             });
           }
         }
@@ -1044,35 +1076,47 @@ export default function App() {
 
   const refreshOnlineOrdersNow = useCallback(
     async (shouldRingOnNew = false) => {
-      if (!scriptUrl || !scriptUrl.trim()) return;
-      const remoteOrders = await fetchOnlineOrdersFromSheets(scriptUrl);
-      if (!remoteOrders || remoteOrders.length === 0) return;
-      mergeOrdersIntoState(remoteOrders, shouldRingOnNew);
+      const [{ orders: sbOrders }, sheetOrders] = await Promise.all([
+        fetchOrdersFromSupabase(60),
+        scriptUrl && scriptUrl.trim() ? fetchOnlineOrdersFromSheets(scriptUrl) : Promise.resolve([]),
+      ]);
+
+      if (sbOrders && sbOrders.length > 0) {
+        const mappedFromSupabase = sbOrders.map((row, idx) =>
+          mapSupabaseOrderToQueueOrder(row, sbOrders.length - idx)
+        );
+        mergeOrdersIntoState(mappedFromSupabase, shouldRingOnNew);
+      }
+      if (sheetOrders && sheetOrders.length > 0) {
+        mergeOrdersIntoState(sheetOrders, shouldRingOnNew);
+      }
     },
     [scriptUrl, mergeOrdersIntoState]
   );
 
   useEffect(() => {
+    refreshOnlineOrdersNow(false);
     if (scriptUrl) {
       syncAllBackendNow();
       flushOfflineQueue(scriptUrl);
     }
     const onOnline = () => {
       flushOfflineQueue(scriptUrl);
+      refreshOnlineOrdersNow(false);
     };
     window.addEventListener('online', onOnline);
     return () => window.removeEventListener('online', onOnline);
-  }, [scriptUrl, syncAllBackendNow]);
+  }, [scriptUrl, syncAllBackendNow, refreshOnlineOrdersNow]);
 
-  // Background 10s fallback poll from Google Sheets when POS or Customer menu is open
+  // Background 10s fallback poll from Supabase & Google Sheets when POS or Customer menu is open
   useEffect(() => {
-    if (!scriptUrl || !scriptUrl.trim()) return;
     if (viewScreen !== 'staff-pos' && viewScreen !== 'customer') return;
+    refreshOnlineOrdersNow(false);
     const timer = window.setInterval(() => {
       refreshOnlineOrdersNow(viewScreen === 'staff-pos');
     }, 10000);
     return () => window.clearInterval(timer);
-  }, [scriptUrl, viewScreen, refreshOnlineOrdersNow]);
+  }, [viewScreen, refreshOnlineOrdersNow]);
 
   // Background 4s HTTP sync fallback with server room (handles mobile WebSocket sleep/app-switching)
   useEffect(() => {
@@ -1341,6 +1385,53 @@ export default function App() {
       const issuedTimestamp = new Date().toLocaleString('th-TH');
       const issuedIso = new Date().toISOString();
 
+      // Upload slip to Supabase Storage ("slips" bucket) and insert order into "orders" table
+      const supabasePaymentMethod: 'cash' | 'transfer' =
+        checkoutState.method === 'เงินสด' ? 'cash' : 'transfer';
+      const supabaseItems: SupabaseOrderItem[] =
+        activeItems.length > 0
+          ? activeItems.map((i) => ({
+              id: i.menuItemId || i.id,
+              name: i.name,
+              qty: i.qty,
+              price: i.price,
+              subtotal: Number((i.price * i.qty).toFixed(2)),
+              ...(i.tasteNote ? { tasteNote: i.tasteNote } : {}),
+            }))
+          : [
+              {
+                name: itemsSummary,
+                qty: 1,
+                price: totalAmt,
+                subtotal: totalAmt,
+              },
+            ];
+
+      let resolvedSlipUrl: string | null =
+        supabasePaymentMethod === 'cash'
+          ? null
+          : slipMeta?.slipPublicUrl && isSafeHttpUrl(slipMeta.slipPublicUrl)
+            ? slipMeta.slipPublicUrl.trim()
+            : null;
+
+      if (supabasePaymentMethod === 'transfer' && !resolvedSlipUrl && cleanSlip) {
+        const uploaded = await uploadSlipToSupabase(cleanSlip);
+        if (uploaded.publicUrl) {
+          resolvedSlipUrl = uploaded.publicUrl;
+        }
+      }
+
+      const { order: savedSupabaseOrder } = await insertOrderToSupabase({
+        items: supabaseItems,
+        total_amount: totalAmt,
+        payment_method: supabasePaymentMethod,
+        slip_url: resolvedSlipUrl,
+        status: 'pending',
+      });
+      if (savedSupabaseOrder) {
+        setSupabaseOrdersVersion((v) => v + 1);
+      }
+
       let createdOrderObj: CustomerQueueOrder | null = null;
       if (isKrua && menuCart.length > 0) {
         const nextQueueNo = queueOrders.length > 0 ? Math.max(...queueOrders.map((q) => q.queueNo)) + 1 : 1;
@@ -1351,6 +1442,7 @@ export default function App() {
         createdOrderObj = {
           queueNo: nextQueueNo,
           orderId: billId,
+          supabaseOrderId: savedSupabaseOrder?.id,
           items: menuCart,
           totalAmount: totalAmt,
           totalStars,
@@ -1359,7 +1451,8 @@ export default function App() {
           paymentMethod: checkoutState.method,
           customerName: cleanCustomerName || undefined,
           dropPoint: resolvedDropPoint,
-          slipImageUrl: cleanSlip,
+          slipImageUrl: resolvedSlipUrl || cleanSlip,
+          slip_url: resolvedSlipUrl || undefined,
           slipVerifyStatus: slipMeta?.verifyStatus,
           slipDetectedAmount: slipMeta?.detectedAmount,
           slipTransactionRef: slipMeta?.transactionRef,
@@ -1391,7 +1484,13 @@ export default function App() {
           }
           if (httpRes.ok) {
             const okJson = (await httpRes.json()) as { order?: CustomerQueueOrder };
-            if (okJson.order) createdOrderObj = okJson.order;
+            if (okJson.order) {
+              createdOrderObj = {
+                ...okJson.order,
+                slip_url: okJson.order.slip_url || resolvedSlipUrl || undefined,
+                supabaseOrderId: okJson.order.supabaseOrderId ?? savedSupabaseOrder?.id,
+              };
+            }
           }
         } catch {
           // Proceed with WebSocket & Sheets queue if HTTP temporarily offline
@@ -1436,7 +1535,7 @@ export default function App() {
         totalStars,
         itemsSummary,
         deliveryInfo: deliveryWithBank,
-        slipImageUrl: cleanSlip,
+        slipImageUrl: resolvedSlipUrl || cleanSlip,
       });
 
       if (issuedReceipt) {
@@ -1446,17 +1545,20 @@ export default function App() {
 
       if (createdOrderObj) {
         knownOrderIdsRef.current.add(createdOrderObj.orderId);
+        if (createdOrderObj.supabaseOrderId != null) {
+          knownOrderIdsRef.current.add(`sb:${String(createdOrderObj.supabaseOrderId)}`);
+        }
         setQueueOrders((prev) => [...prev, createdOrderObj!]);
         syncBroadcastRef.current.broadcastOrderCreated(createdOrderObj);
 
         postToSheets(scriptUrl, 'ออเดอร์ออนไลน์', {
           ...createdOrderObj,
           bankAccount: cleanBank,
-          slipImageUrl: cleanSlip || '',
+          slipImageUrl: resolvedSlipUrl || cleanSlip || '',
           slipStatus:
             slipMeta?.verifyStatus === 'verified'
               ? 'AI ตรวจสลิปตรงยอด'
-              : cleanSlip
+              : resolvedSlipUrl || cleanSlip
                 ? 'แนบสลิปแล้ว (รอตรวจ)'
                 : 'ส่งสลิปทาง LINE (รอตรวจ)',
         });
@@ -1472,61 +1574,15 @@ export default function App() {
         totalAmount: totalAmt,
         totalStars,
         itemsSummary,
-        deliveryInfo: cleanSlip ? `${deliveryWithBank} [แนบสลิปแล้ว]` : deliveryWithBank,
+        deliveryInfo: resolvedSlipUrl || cleanSlip ? `${deliveryWithBank} [แนบสลิปแล้ว]` : deliveryWithBank,
         slipStatus:
           slipMeta?.verifyStatus === 'verified'
             ? 'AI ตรวจสลิปตรงยอด'
-            : cleanSlip
+            : resolvedSlipUrl || cleanSlip
               ? 'แนบสลิปแล้ว'
               : 'ไม่มีสลิป',
-        slipImageUrl: cleanSlip || '',
+        slipImageUrl: resolvedSlipUrl || cleanSlip || '',
       });
-
-      // Save order to Supabase ("orders" table) with Public URL from "slips" bucket
-      const supabasePaymentMethod: 'cash' | 'transfer' =
-        checkoutState.method === 'เงินสด' ? 'cash' : 'transfer';
-      const supabaseItems: SupabaseOrderItem[] =
-        activeItems.length > 0
-          ? activeItems.map((i) => ({
-              id: i.menuItemId || i.id,
-              name: i.name,
-              qty: i.qty,
-              price: i.price,
-              subtotal: Number((i.price * i.qty).toFixed(2)),
-              ...(i.tasteNote ? { tasteNote: i.tasteNote } : {}),
-            }))
-          : [
-              {
-                name: itemsSummary,
-                qty: 1,
-                price: totalAmt,
-                subtotal: totalAmt,
-              },
-            ];
-
-      void (async () => {
-        let resolvedSlipUrl: string | null =
-          supabasePaymentMethod === 'cash' ? null : slipMeta?.slipPublicUrl || null;
-
-        if (supabasePaymentMethod === 'transfer' && !resolvedSlipUrl && cleanSlip) {
-          const uploaded = await uploadSlipToSupabase(cleanSlip);
-          if (uploaded.publicUrl) {
-            resolvedSlipUrl = uploaded.publicUrl;
-          }
-        }
-
-        const { order: savedOrder } = await insertOrderToSupabase({
-          items: supabaseItems,
-          total_amount: totalAmt,
-          payment_method: supabasePaymentMethod,
-          slip_url: resolvedSlipUrl,
-          status: 'pending',
-        });
-
-        if (savedOrder) {
-          setSupabaseOrdersVersion((v) => v + 1);
-        }
-      })();
 
       if (checkoutState.source === 'calculator') {
         setBillItems([]);
@@ -1599,6 +1655,11 @@ export default function App() {
   const handleAcceptQueueOrder = useCallback(
     (orderId: string) => {
       playScanSuccess();
+      const targetOrder = queueOrders.find((q) => q.orderId === orderId);
+      const sbId =
+        targetOrder?.supabaseOrderId ??
+        (orderId.startsWith('SB-') ? orderId.slice(3) : undefined);
+
       setQueueOrders((prev) =>
         prev.map((q) => (q.orderId === orderId ? { ...q, accepted: true } : q))
       );
@@ -1608,6 +1669,11 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ roomId: orgCode, orderId, patch: { accepted: true } }),
       }).catch(() => {});
+      if (sbId != null) {
+        void updateOrderStatusInSupabase(sbId, 'paid').then(({ order }) => {
+          if (order) setSupabaseOrdersVersion((v) => v + 1);
+        });
+      }
       if (scriptUrl && scriptUrl.trim()) {
         postToSheets(scriptUrl, 'ออเดอร์ออนไลน์', {
           actionType: 'updateOrderStatus',
@@ -1616,12 +1682,17 @@ export default function App() {
         });
       }
     },
-    [scriptUrl, orgCode]
+    [queueOrders, scriptUrl, orgCode]
   );
 
   const handleMarkQueueDone = useCallback(
     (orderId: string) => {
       playSoftClick();
+      const targetOrder = queueOrders.find((q) => q.orderId === orderId);
+      const sbId =
+        targetOrder?.supabaseOrderId ??
+        (orderId.startsWith('SB-') ? orderId.slice(3) : undefined);
+
       setQueueOrders((prev) =>
         prev.map((q) => (q.orderId === orderId ? { ...q, accepted: true, status: 'เสร็จแล้ว' } : q))
       );
@@ -1638,6 +1709,11 @@ export default function App() {
           patch: { accepted: true, status: 'เสร็จแล้ว' },
         }),
       }).catch(() => {});
+      if (sbId != null) {
+        void updateOrderStatusInSupabase(sbId, 'completed').then(({ order }) => {
+          if (order) setSupabaseOrdersVersion((v) => v + 1);
+        });
+      }
       if (scriptUrl && scriptUrl.trim()) {
         postToSheets(scriptUrl, 'ออเดอร์ออนไลน์', {
           actionType: 'updateOrderStatus',
@@ -1647,7 +1723,7 @@ export default function App() {
         });
       }
     },
-    [scriptUrl, orgCode]
+    [queueOrders, scriptUrl, orgCode]
   );
 
   // 1. WELCOME LANDING SCREEN (หน้าแรกต้อนรับลูกค้า + ป้ายโฆษณา + ถาม-ตอบด่วน)
@@ -2659,7 +2735,7 @@ export default function App() {
             }}
             onAcceptQueueOrder={handleAcceptQueueOrder}
             onMarkQueueDone={handleMarkQueueDone}
-            onRefreshOrdersFromSheets={scriptUrl.trim() ? () => refreshOnlineOrdersNow(false) : undefined}
+            onRefreshOrdersFromSheets={() => refreshOnlineOrdersNow(false)}
           />
         )}
       </main>

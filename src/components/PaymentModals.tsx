@@ -303,7 +303,7 @@ interface QrPaymentModalProps {
     slipImageUrl?: string,
     bankAccountLabel?: string,
     slipMeta?: SlipVerifyMeta
-  ) => void;
+  ) => Promise<void> | void;
 }
 
 export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
@@ -337,6 +337,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
   const [slipVerifyMeta, setSlipVerifyMeta] = useState<SlipVerifyMeta | null>(null);
   const [isCompressingSlip, setIsCompressingSlip] = useState(false);
   const [isVerifyingSlip, setIsVerifyingSlip] = useState(false);
+  const [isSubmittingOrder, setIsSubmittingOrder] = useState(false);
   const [slipZoomOpen, setSlipZoomOpen] = useState(false);
   const [copiedAccountNo, setCopiedAccountNo] = useState(false);
   const [lineBackupConfirmed, setLineBackupConfirmed] = useState(false);
@@ -392,6 +393,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
       setSlipVerifyMeta(null);
       setIsCompressingSlip(false);
       setIsVerifyingSlip(false);
+      setIsSubmittingOrder(false);
       setSlipZoomOpen(false);
       setLineBackupConfirmed(false);
       setShowLineQrPreview(false);
@@ -468,9 +470,17 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
     }
 
     setIsVerifyingSlip(true);
+    let uploadedPublicUrl = '';
     try {
-      const [uploadRes, verifyRes] = await Promise.all([
-        uploadSlipToSupabase(file),
+      const uploadTask = (async () => {
+        const firstTry = await uploadSlipToSupabase(file);
+        if (firstTry.publicUrl) return firstTry.publicUrl;
+        const fallbackTry = await uploadSlipToSupabase(compressed);
+        return fallbackTry.publicUrl || '';
+      })();
+
+      const [resolvedUrl, verifyRes] = await Promise.all([
+        uploadTask,
         fetch('/api/verify-slip', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -485,7 +495,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
         }).catch(() => null),
       ]);
 
-      const uploadedPublicUrl = uploadRes.publicUrl || '';
+      uploadedPublicUrl = resolvedUrl;
       const data = verifyRes
         ? ((await verifyRes.json().catch(() => ({}))) as {
             verified?: boolean;
@@ -547,9 +557,13 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
       });
       playSoftClick();
     } catch {
+      if (uploadedPublicUrl) {
+        setSlipPublicUrl(uploadedPublicUrl);
+      }
       setSlipImageUrl(compressed);
       setSlipVerifyMeta({
         verifyStatus: 'unverified',
+        slipPublicUrl: uploadedPublicUrl || undefined,
         verifyNote: tx(
           'ไม่สามารถเชื่อมต่อระบบตรวจสลิปอัตโนมัติ · รอร้านตรวจยอดเงินเข้าบัญชีด้วยตนเอง',
           'Could not reach auto slip check · Waiting for manual shop verification'
@@ -1096,9 +1110,11 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                 disabled={
                   isCompressingSlip ||
                   isVerifyingSlip ||
+                  isSubmittingOrder ||
                   (allowSlipUpload && !slipImageUrl && !lineBackupConfirmed)
                 }
-                onClick={() => {
+                onClick={async () => {
+                  if (isSubmittingOrder) return;
                   const meta: SlipVerifyMeta | undefined = allowSlipUpload
                     ? slipImageUrl
                       ? {
@@ -1118,16 +1134,24 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                           slipPublicUrl: slipPublicUrl || slipVerifyMeta?.slipPublicUrl,
                         }
                       : undefined;
-                  onConfirmPaid(slipImageUrl || undefined, bankLabel, meta);
+                  setIsSubmittingOrder(true);
+                  try {
+                    await onConfirmPaid(slipImageUrl || undefined, bankLabel, meta);
+                  } finally {
+                    setIsSubmittingOrder(false);
+                  }
                 }}
-                className="col-span-2 h-14 rounded-2xl font-bold text-base sm:text-lg text-white cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed transition-transform active:scale-95"
+                className="col-span-2 h-14 rounded-2xl font-bold text-base sm:text-lg text-white cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed transition-transform active:scale-95 flex items-center justify-center gap-2"
                 style={{ backgroundColor: allowSlipUpload ? '#0369A1' : '#16A34A' }}
               >
-                {allowSlipUpload
-                  ? slipImageUrl
-                    ? tx('ส่งออเดอร์ & สลิปให้ร้านตรวจสอบ ✓', 'Send Order & Slip for Verification ✓')
-                    : tx('ส่งออเดอร์ (รอตรวจสลิปทาง LINE) ✓', 'Send Order (LINE Slip Check) ✓')
-                  : tx('โอนเรียบร้อยแล้ว ✓', 'Payment Confirmed ✓')}
+                {isSubmittingOrder && <Loader2 className="w-5 h-5 animate-spin" />}
+                {isSubmittingOrder
+                  ? tx('กำลังบันทึกออเดอร์และสลิป...', 'Saving order & slip...')
+                  : allowSlipUpload
+                    ? slipImageUrl
+                      ? tx('ส่งออเดอร์ & สลิปให้ร้านตรวจสอบ ✓', 'Send Order & Slip for Verification ✓')
+                      : tx('ส่งออเดอร์ (รอตรวจสลิปทาง LINE) ✓', 'Send Order (LINE Slip Check) ✓')
+                    : tx('โอนเรียบร้อยแล้ว ✓', 'Payment Confirmed ✓')}
               </button>
             </div>
           </div>
