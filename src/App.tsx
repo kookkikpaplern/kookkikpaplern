@@ -89,6 +89,11 @@ import {
   playSuccessChime,
 } from './utils/sound';
 import { SharedShopConfigPayload, useRealtimeShopSync } from './utils/realtimeSync';
+import {
+  insertOrderToSupabase,
+  SupabaseOrderItem,
+  uploadSlipToSupabase,
+} from './utils/supabaseClient';
 
 const KEYS = {
   CONFIG_VER: 'kkp_config_version',
@@ -431,6 +436,7 @@ export default function App() {
   const [memberRewardsOpen, setMemberRewardsOpen] = useState(false);
   const [toolbarOrganizerOpen, setToolbarOrganizerOpen] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [supabaseOrdersVersion, setSupabaseOrdersVersion] = useState(0);
   const [scanToast, setScanToast] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
   // Customizable Top Toolbar Order, Hidden Buttons & Staff Allowance State
@@ -634,18 +640,14 @@ export default function App() {
       setActivePaymentAccountId(s.activePaymentAccountId);
       localStorage.setItem(KEYS.ACTIVE_PAYMENT_ACCOUNT_ID, s.activePaymentAccountId);
     }
-    if (s.lineShopUrl !== undefined) {
+    if (s.lineShopUrl) {
       setLineShopUrl(s.lineShopUrl);
       localStorage.setItem(KEYS.LINE_SHOP_URL, s.lineShopUrl);
     }
-    if (s.lineQrImageUrl !== undefined) {
+    if (s.lineQrImageUrl) {
       setLineQrImageUrl(s.lineQrImageUrl);
       try {
-        if (s.lineQrImageUrl) {
-          localStorage.setItem(KEYS.LINE_QR_IMAGE, s.lineQrImageUrl);
-        } else {
-          localStorage.removeItem(KEYS.LINE_QR_IMAGE);
-        }
+        localStorage.setItem(KEYS.LINE_QR_IMAGE, s.lineQrImageUrl);
       } catch {
         // Ignore storage quota error
       }
@@ -1479,6 +1481,52 @@ export default function App() {
               : 'ไม่มีสลิป',
         slipImageUrl: cleanSlip || '',
       });
+
+      // Save order to Supabase ("orders" table) with Public URL from "slips" bucket
+      const supabasePaymentMethod: 'cash' | 'transfer' =
+        checkoutState.method === 'เงินสด' ? 'cash' : 'transfer';
+      const supabaseItems: SupabaseOrderItem[] =
+        activeItems.length > 0
+          ? activeItems.map((i) => ({
+              id: i.menuItemId || i.id,
+              name: i.name,
+              qty: i.qty,
+              price: i.price,
+              subtotal: Number((i.price * i.qty).toFixed(2)),
+              ...(i.tasteNote ? { tasteNote: i.tasteNote } : {}),
+            }))
+          : [
+              {
+                name: itemsSummary,
+                qty: 1,
+                price: totalAmt,
+                subtotal: totalAmt,
+              },
+            ];
+
+      void (async () => {
+        let resolvedSlipUrl: string | null =
+          supabasePaymentMethod === 'cash' ? null : slipMeta?.slipPublicUrl || null;
+
+        if (supabasePaymentMethod === 'transfer' && !resolvedSlipUrl && cleanSlip) {
+          const uploaded = await uploadSlipToSupabase(cleanSlip);
+          if (uploaded.publicUrl) {
+            resolvedSlipUrl = uploaded.publicUrl;
+          }
+        }
+
+        const { order: savedOrder } = await insertOrderToSupabase({
+          items: supabaseItems,
+          total_amount: totalAmt,
+          payment_method: supabasePaymentMethod,
+          slip_url: resolvedSlipUrl,
+          status: 'pending',
+        });
+
+        if (savedOrder) {
+          setSupabaseOrdersVersion((v) => v + 1);
+        }
+      })();
 
       if (checkoutState.source === 'calculator') {
         setBillItems([]);
@@ -2330,7 +2378,7 @@ export default function App() {
                       }}
                     >
                       <FileSpreadsheet className="w-4 h-4 shrink-0" />
-                      {tx('สรุปยอด / LINE / Excel', 'Summary / LINE / Excel')}
+                      {tx('ออเดอร์ & ตรวจสอบยอดขาย', 'Orders & Sales Check')}
                     </button>
                   );
                 case 'settings':
@@ -2945,6 +2993,7 @@ export default function App() {
           }}
           onSyncAllNow={syncAllBackendNow}
           onFlushQueueNow={() => flushOfflineQueue(scriptUrl)}
+          supabaseOrdersVersion={supabaseOrdersVersion}
         />
       )}
     </div>

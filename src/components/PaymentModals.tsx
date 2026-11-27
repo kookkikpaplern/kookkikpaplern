@@ -33,6 +33,7 @@ import {
   extractLineOaId,
   LineDeliveryInfo,
 } from '../utils/lineOrder';
+import { uploadSlipToSupabase } from '../utils/supabaseClient';
 import { generatePromptPayQrDataUrl, isValidPromptPayTarget } from '../utils/promptpay';
 import {
   BillLineItem,
@@ -275,6 +276,7 @@ export interface SlipVerifyMeta {
   detectedAmount?: number;
   transactionRef?: string;
   verifyNote?: string;
+  slipPublicUrl?: string;
 }
 
 interface QrPaymentModalProps {
@@ -330,6 +332,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
   const [qrUrl, setQrUrl] = useState('');
   const [isAutoPolling, setIsAutoPolling] = useState(false);
   const [slipImageUrl, setSlipImageUrl] = useState('');
+  const [slipPublicUrl, setSlipPublicUrl] = useState('');
   const [slipError, setSlipError] = useState('');
   const [slipVerifyMeta, setSlipVerifyMeta] = useState<SlipVerifyMeta | null>(null);
   const [isCompressingSlip, setIsCompressingSlip] = useState(false);
@@ -384,6 +387,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
   useEffect(() => {
     if (!isOpen) {
       setSlipImageUrl('');
+      setSlipPublicUrl('');
       setSlipError('');
       setSlipVerifyMeta(null);
       setIsCompressingSlip(false);
@@ -443,6 +447,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
     setSlipError('');
     setSlipVerifyMeta(null);
     setSlipImageUrl('');
+    setSlipPublicUrl('');
     setIsCompressingSlip(true);
 
     let compressed = '';
@@ -464,29 +469,37 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
 
     setIsVerifyingSlip(true);
     try {
-      const res = await fetch('/api/verify-slip', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          slipImageUrl: compressed,
-          expectedAmount: amount,
-          expectedAccountName: selectedAccount?.accountName || promptPayAccountName,
-          expectedPromptPayId: activePromptPayTarget || selectedAccount?.accountNumber || promptPayId,
-          roomId,
-          lang,
-        }),
-      });
-      const data = (await res.json()) as {
-        verified?: boolean;
-        status?: 'verified' | 'rejected' | 'unverified_ai_error';
-        detectedAmount?: number;
-        transactionRef?: string;
-        reason?: string;
-      };
+      const [uploadRes, verifyRes] = await Promise.all([
+        uploadSlipToSupabase(file),
+        fetch('/api/verify-slip', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            slipImageUrl: compressed,
+            expectedAmount: amount,
+            expectedAccountName: selectedAccount?.accountName || promptPayAccountName,
+            expectedPromptPayId: activePromptPayTarget || selectedAccount?.accountNumber || promptPayId,
+            roomId,
+            lang,
+          }),
+        }).catch(() => null),
+      ]);
+
+      const uploadedPublicUrl = uploadRes.publicUrl || '';
+      const data = verifyRes
+        ? ((await verifyRes.json().catch(() => ({}))) as {
+            verified?: boolean;
+            status?: 'verified' | 'rejected' | 'unverified_ai_error';
+            detectedAmount?: number;
+            transactionRef?: string;
+            reason?: string;
+          })
+        : {};
 
       if (data.status === 'rejected') {
         playScanError();
         setSlipImageUrl('');
+        setSlipPublicUrl('');
         setSlipVerifyMeta(null);
         setSlipError(
           data.reason ||
@@ -498,6 +511,10 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
         return;
       }
 
+      if (uploadedPublicUrl) {
+        setSlipPublicUrl(uploadedPublicUrl);
+      }
+
       if (data.status === 'verified' && data.verified) {
         setSlipImageUrl(compressed);
         setSlipVerifyMeta({
@@ -505,6 +522,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
           detectedAmount: data.detectedAmount,
           transactionRef: data.transactionRef,
           verifyNote: data.reason,
+          slipPublicUrl: uploadedPublicUrl || undefined,
         });
         playScanSuccess();
         return;
@@ -514,12 +532,18 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
       setSlipImageUrl(compressed);
       setSlipVerifyMeta({
         verifyStatus: 'unverified',
+        slipPublicUrl: uploadedPublicUrl || undefined,
         verifyNote:
           data.reason ||
-          tx(
-            'ระบบตรวจสลิปอัตโนมัติไม่ว่างชั่วคราว · รอร้านตรวจยอดเงินเข้าบัญชีด้วยตนเอง',
-            'Auto slip verification unavailable · Waiting for manual shop verification'
-          ),
+          (uploadedPublicUrl
+            ? tx(
+                'อัปโหลดสลิปขึ้นระบบคลาวด์แล้ว ✓ รอร้านตรวจยอดเงิน',
+                'Slip uploaded to cloud ✓ Waiting for shop verification'
+              )
+            : tx(
+                'ระบบตรวจสลิปอัตโนมัติไม่ว่างชั่วคราว · รอร้านตรวจยอดเงินเข้าบัญชีด้วยตนเอง',
+                'Auto slip verification unavailable · Waiting for manual shop verification'
+              )),
       });
       playSoftClick();
     } catch {
@@ -833,6 +857,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                           onClick={() => {
                             playSoftClick();
                             setSlipImageUrl('');
+                            setSlipPublicUrl('');
                             setSlipVerifyMeta(null);
                             setSlipError('');
                           }}
@@ -986,6 +1011,77 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                   )}
             </p>
 
+            {/* Optional Slip Upload for Staff POS QR Modal */}
+            {!allowSlipUpload && (
+              <div
+                className="w-full rounded-2xl border p-3 flex flex-wrap items-center justify-between gap-2 text-left"
+                style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
+              >
+                <input
+                  ref={slipInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleSlipFileChange}
+                  className="hidden"
+                />
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-bold truncate" style={{ color: 'var(--text-main)' }}>
+                    {slipImageUrl
+                      ? slipPublicUrl
+                        ? tx('แนบสลิป & บันทึกขึ้น Supabase แล้ว ✓', 'Slip attached & uploaded ✓')
+                        : tx('แนบรูปสลิปแล้ว ✓', 'Slip attached ✓')
+                      : tx('แนบสลิปโอนเงินเก็บลงฐานข้อมูล (ไม่บังคับ)', 'Attach slip to save with order (optional)')}
+                  </p>
+                  {slipError && (
+                    <p className="text-[11px] font-semibold text-rose-600">{slipError}</p>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <button
+                    type="button"
+                    disabled={isCompressingSlip || isVerifyingSlip}
+                    onClick={() => {
+                      playSoftClick();
+                      slipInputRef.current?.click();
+                    }}
+                    className="px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                    style={{
+                      backgroundColor: 'var(--accent-soft)',
+                      borderColor: 'var(--accent-border)',
+                      color: 'var(--accent-text)',
+                    }}
+                  >
+                    {isVerifyingSlip || isCompressingSlip ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Paperclip className="w-3.5 h-3.5" />
+                    )}
+                    {isVerifyingSlip || isCompressingSlip
+                      ? tx('กำลังอัปโหลด...', 'Uploading...')
+                      : slipImageUrl
+                        ? tx('เปลี่ยนสลิป', 'Change')
+                        : tx('แนบรูปสลิป', 'Attach Slip')}
+                  </button>
+                  {slipImageUrl && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playSoftClick();
+                        setSlipImageUrl('');
+                        setSlipPublicUrl('');
+                        setSlipVerifyMeta(null);
+                        setSlipError('');
+                      }}
+                      className="px-2 py-1.5 rounded-xl text-xs font-bold cursor-pointer"
+                      style={{ backgroundColor: 'var(--pastel-pink)', color: 'var(--pastel-pink-text)' }}
+                    >
+                      {tx('ลบ', 'Remove')}
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
             <div className="grid grid-cols-3 gap-2.5 w-full">
               <button
                 type="button"
@@ -1005,7 +1101,10 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                 onClick={() => {
                   const meta: SlipVerifyMeta | undefined = allowSlipUpload
                     ? slipImageUrl
-                      ? slipVerifyMeta || { verifyStatus: 'unverified' }
+                      ? {
+                          ...(slipVerifyMeta || { verifyStatus: 'unverified' }),
+                          slipPublicUrl: slipPublicUrl || slipVerifyMeta?.slipPublicUrl,
+                        }
                       : {
                           verifyStatus: 'manual_line',
                           verifyNote: tx(
@@ -1013,7 +1112,12 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                             'Customer opted for LINE backup slip · Waiting for manual shop verification'
                           ),
                         }
-                    : undefined;
+                    : slipImageUrl
+                      ? {
+                          ...(slipVerifyMeta || { verifyStatus: 'unverified' }),
+                          slipPublicUrl: slipPublicUrl || slipVerifyMeta?.slipPublicUrl,
+                        }
+                      : undefined;
                   onConfirmPaid(slipImageUrl || undefined, bankLabel, meta);
                 }}
                 className="col-span-2 h-14 rounded-2xl font-bold text-base sm:text-lg text-white cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed transition-transform active:scale-95"

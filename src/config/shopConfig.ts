@@ -124,8 +124,8 @@ export const SHOP_CONFIG = {
       promptPayId: '0837596411',
     },
   ] as PaymentAccount[],
-  lineShopUrl: '',
-  lineQrImageUrl: '',
+  lineShopUrl: 'https://line.me/R/ti/p/1h-FRjxODZ',
+  lineQrImageUrl: '/assets/aistudio/________d2f64c8d.jpg',
   scriptUrl:
     'https://script.google.com/macros/s/AKfycbx0HhQUqRtnnSKJwIp_Ld7QRtmg-kdbEq4J9M6T_WtlRjuWBSdwVSYYHH_V2OAH8cp_/exec',
   rewardNotice: '⭐ สะสมครบ 50 ดาว แลกฟรี! เมนูแนะนำ 1 อย่าง',

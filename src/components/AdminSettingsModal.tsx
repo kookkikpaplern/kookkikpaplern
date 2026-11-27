@@ -1,16 +1,20 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Barcode,
   Building2,
   Camera,
   Check,
+  CheckCircle2,
+  Clock,
   Copy,
   Database,
   Download,
+  ExternalLink,
   FileImage,
   FileSpreadsheet,
   Gift,
   ImagePlus,
+  Loader2,
   MessageCircle,
   MessageCircleQuestion,
   Palette,
@@ -65,6 +69,13 @@ import {
   decodeQrCodeFromFile,
   extractLineOaId,
 } from '../utils/lineOrder';
+import {
+  fetchOrdersFromSupabase,
+  isSafeHttpUrl,
+  SUPABASE_SETUP_SQL,
+  SupabaseOrderRow,
+  updateOrderStatusInSupabase,
+} from '../utils/supabaseClient';
 import { playSoftClick } from '../utils/sound';
 
 export type AdminSettingsTab = 'general' | 'products' | 'faq' | 'summary' | 'sheets';
@@ -129,6 +140,7 @@ interface AdminSettingsModalProps {
   onToggleAutoPaymentCheck: (val: boolean) => void;
   onSyncAllNow: () => Promise<string>;
   onFlushQueueNow: () => Promise<number>;
+  supabaseOrdersVersion?: number;
 }
 
 export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
@@ -191,6 +203,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   onToggleAutoPaymentCheck,
   onSyncAllNow,
   onFlushQueueNow,
+  supabaseOrdersVersion = 0,
 }) => {
   const { lang, tx } = useLang();
   const [activeTab, setActiveTab] = useState<AdminSettingsTab>(initialTab);
@@ -198,6 +211,15 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   const [copiedLine, setCopiedLine] = useState(false);
   const [statusMsg, setStatusMsg] = useState('');
   const [syncing, setSyncing] = useState(false);
+  const [supabaseOrders, setSupabaseOrders] = useState<SupabaseOrderRow[]>([]);
+  const [supabaseLoading, setSupabaseLoading] = useState(false);
+  const [supabaseError, setSupabaseError] = useState('');
+  const [supabaseStatusFilter, setSupabaseStatusFilter] = useState<
+    'all' | 'pending' | 'paid' | 'completed'
+  >('all');
+  const [updatingOrderId, setUpdatingOrderId] = useState<string | number | null>(null);
+  const [showSqlHelper, setShowSqlHelper] = useState(false);
+  const [copiedSqlSetup, setCopiedSqlSetup] = useState(false);
   const [previewBill, setPreviewBill] = useState<{
     id: string;
     timestamp: string;
@@ -206,6 +228,75 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
     deliveryInfo?: string;
     slipImageUrl: string;
   } | null>(null);
+
+  const loadSupabaseOrders = useCallback(async () => {
+    setSupabaseLoading(true);
+    setSupabaseError('');
+    const { orders, error } = await fetchOrdersFromSupabase(100);
+    setSupabaseLoading(false);
+    if (error) {
+      setSupabaseError(error);
+      return;
+    }
+    setSupabaseOrders(orders);
+  }, []);
+
+  useEffect(() => {
+    if (isOpen && activeTab === 'summary') {
+      void loadSupabaseOrders();
+    }
+  }, [isOpen, activeTab, supabaseOrdersVersion, loadSupabaseOrders]);
+
+  const handleChangeSupabaseOrderStatus = async (
+    orderId: string | number,
+    nextStatus: 'pending' | 'paid' | 'completed' | 'cancelled'
+  ) => {
+    playSoftClick();
+    setUpdatingOrderId(orderId);
+    const { order, error } = await updateOrderStatusInSupabase(orderId, nextStatus);
+    setUpdatingOrderId(null);
+    if (error) {
+      setSupabaseError(error);
+      return;
+    }
+    setSupabaseOrders((prev) =>
+      prev.map((row) =>
+        row.id === orderId ? (order || { ...row, status: nextStatus }) : row
+      )
+    );
+    setStatusMsg(
+      tx(
+        `อัปเดตสถานะออเดอร์ #${orderId} เป็น "${nextStatus}" เรียบร้อยแล้วค่ะ`,
+        `Updated order #${orderId} status to "${nextStatus}".`
+      )
+    );
+  };
+
+  const filteredSupabaseOrders = useMemo(() => {
+    if (supabaseStatusFilter === 'all') return supabaseOrders;
+    return supabaseOrders.filter(
+      (o) => String(o.status || 'pending').toLowerCase() === supabaseStatusFilter
+    );
+  }, [supabaseOrders, supabaseStatusFilter]);
+
+  const supabaseOrderStats = useMemo(() => {
+    let pendingCount = 0;
+    let paidRevenue = 0;
+    let totalRevenue = 0;
+    supabaseOrders.forEach((o) => {
+      const amt = Number(o.total_amount) || 0;
+      const st = String(o.status || 'pending').toLowerCase();
+      if (st !== 'cancelled') totalRevenue += amt;
+      if (st === 'pending') pendingCount += 1;
+      if (st === 'paid' || st === 'completed') paidRevenue += amt;
+    });
+    return {
+      totalCount: supabaseOrders.length,
+      pendingCount,
+      paidRevenue,
+      totalRevenue,
+    };
+  }, [supabaseOrders]);
 
   // Add/Edit Payment Bank Account state
   const [showAddAccountForm, setShowAddAccountForm] = useState(false);
@@ -968,7 +1059,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
           {[
             { id: 'general', label: tx('ธีม & โหมดร้าน', 'Themes & Mode'), icon: Palette },
             { id: 'products', label: tx('สินค้าบาร์โค้ด (Excel)', 'Products & Excel'), icon: Barcode },
-            { id: 'summary', label: tx('สรุปยอด / LINE / Excel', 'Summary / LINE / Excel'), icon: FileSpreadsheet },
+            { id: 'summary', label: tx('ออเดอร์ / ตรวจสอบยอดขาย', 'Orders & Sales Check'), icon: FileSpreadsheet },
             { id: 'faq', label: tx('โปรโมชัน / ถาม-ตอบหน้าแรก', 'Promos / Home Q&A'), icon: MessageCircleQuestion },
             { id: 'sheets', label: tx('Google Sheets หลังบ้าน', 'Google Sheets'), icon: Database },
           ].map((tab) => {
@@ -2666,9 +2757,328 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
             </div>
           )}
 
-          {/* ================= TAB 3: SUMMARY / LINE / EXCEL ================= */}
+          {/* ================= TAB 3: SUPABASE ORDERS / SUMMARY / LINE / EXCEL ================= */}
           {activeTab === 'summary' && (
             <div className="space-y-6">
+              {/* Supabase Cloud Orders & Slip Review Section */}
+              <div
+                className="rounded-3xl border-2 p-4 sm:p-5 space-y-4"
+                style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--accent-border)' }}
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-base font-bold flex items-center gap-2" style={{ color: 'var(--text-main)' }}>
+                      <Database className="w-4 h-4" style={{ color: 'var(--accent-primary)' }} />
+                      {tx('รายการออเดอร์ & สลิปจาก Supabase (ล่าสุดขึ้นก่อน)', 'Supabase Orders & Slip Verification (Newest First)')}
+                    </h3>
+                    <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                      {tx(
+                        'ดึงจากตาราง orders และรูปสลิปจาก Storage bucket "slips" พร้อมกดปรับสถานะได้ทันที',
+                        'Live records from "orders" table & "slips" storage bucket'
+                      )}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playSoftClick();
+                        setShowSqlHelper((prev) => !prev);
+                      }}
+                      className="px-3 py-1.5 rounded-xl border text-xs font-semibold cursor-pointer"
+                      style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)', color: 'var(--text-muted)' }}
+                    >
+                      {showSqlHelper ? tx('ซ่อน SQL ตั้งค่า', 'Hide SQL') : tx('ดู SQL ตั้งค่า Supabase', 'Supabase SQL')}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={supabaseLoading}
+                      onClick={() => {
+                        playSoftClick();
+                        void loadSupabaseOrders();
+                      }}
+                      className="px-3.5 py-1.5 rounded-xl text-xs font-bold text-white flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                      style={{ backgroundColor: 'var(--accent-primary)' }}
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${supabaseLoading ? 'animate-spin' : ''}`} />
+                      {tx('รีเฟรชออเดอร์', 'Refresh')}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Live KPI Summary Row */}
+                <div className="grid grid-cols-3 gap-2.5">
+                  <div className="rounded-2xl border p-3" style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}>
+                    <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{tx('ออเดอร์ทั้งหมด', 'Total Orders')}</p>
+                    <p className="font-num text-xl font-extrabold" style={{ color: 'var(--text-main)' }}>
+                      {supabaseOrderStats.totalCount}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border p-3" style={{ backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }}>
+                    <p className="text-[11px] text-amber-800">{tx('รอตรวจ (pending)', 'Pending')}</p>
+                    <p className="font-num text-xl font-extrabold text-amber-700">
+                      {supabaseOrderStats.pendingCount}
+                    </p>
+                  </div>
+                  <div className="rounded-2xl border p-3" style={{ backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' }}>
+                    <p className="text-[11px] text-emerald-800">{tx('ยอดชำระแล้ว (paid/done)', 'Confirmed Revenue')}</p>
+                    <p className="font-num text-xl font-extrabold text-emerald-700">
+                      ฿{supabaseOrderStats.paidRevenue.toLocaleString('th-TH')}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Status Filter Row */}
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { id: 'all', label: tx(`ทั้งหมด (${supabaseOrders.length})`, `All (${supabaseOrders.length})`) },
+                    { id: 'pending', label: tx('รอตรวจ (pending)', 'Pending') },
+                    { id: 'paid', label: tx('ชำระแล้ว (paid)', 'Paid') },
+                    { id: 'completed', label: tx('เสร็จสิ้น (completed)', 'Completed') },
+                  ].map((f) => {
+                    const active = supabaseStatusFilter === f.id;
+                    return (
+                      <button
+                        key={f.id}
+                        type="button"
+                        onClick={() => {
+                          playSoftClick();
+                          setSupabaseStatusFilter(f.id as 'all' | 'pending' | 'paid' | 'completed');
+                        }}
+                        className="px-3 py-1.5 rounded-xl border text-xs font-bold cursor-pointer"
+                        style={{
+                          backgroundColor: active ? 'var(--accent-primary)' : 'var(--bg-card)',
+                          borderColor: active ? 'var(--accent-primary)' : 'var(--border-soft)',
+                          color: active ? '#FFFFFF' : 'var(--text-main)',
+                        }}
+                      >
+                        {f.label}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {supabaseError && (
+                  <div
+                    className="rounded-2xl border p-3.5 text-xs space-y-2"
+                    style={{ backgroundColor: '#FFF7ED', borderColor: '#FDBA74', color: '#9A3412' }}
+                  >
+                    <p className="font-bold">
+                      {tx(
+                        `ไม่สามารถดึงข้อมูลจาก Supabase ได้: ${supabaseError}`,
+                        `Supabase error: ${supabaseError}`
+                      )}
+                    </p>
+                    <p>
+                      {tx(
+                        'หากเพิ่งเชื่อมต่อครั้งแรก กรุณานำ SQL ด้านล่างไปรันใน Supabase SQL Editor เพื่อสร้างตาราง orders และ bucket "slips" นะคะ',
+                        'If this is your first setup, run the SQL below in Supabase SQL Editor to create the "orders" table and "slips" bucket.'
+                      )}
+                    </p>
+                  </div>
+                )}
+
+                {(showSqlHelper || Boolean(supabaseError)) && (
+                  <div className="rounded-2xl border p-3.5 space-y-2" style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold" style={{ color: 'var(--text-main)' }}>
+                        {tx('SQL สร้างตาราง "orders" และ Storage bucket "slips"', 'SQL Setup for "orders" table & "slips" bucket')}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          playSoftClick();
+                          try {
+                            await navigator.clipboard.writeText(SUPABASE_SETUP_SQL);
+                            setCopiedSqlSetup(true);
+                            window.setTimeout(() => setCopiedSqlSetup(false), 3000);
+                          } catch {
+                            // Ignore clipboard error
+                          }
+                        }}
+                        className="px-3 py-1 rounded-xl text-xs font-bold flex items-center gap-1 cursor-pointer"
+                        style={{ backgroundColor: 'var(--accent-soft)', color: 'var(--accent-text)' }}
+                      >
+                        {copiedSqlSetup ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                        {copiedSqlSetup ? tx('คัดลอกแล้ว!', 'Copied!') : tx('คัดลอก SQL', 'Copy SQL')}
+                      </button>
+                    </div>
+                    <pre className="text-[11px] font-mono p-3 rounded-xl border overflow-x-auto max-h-44" style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}>
+                      {SUPABASE_SETUP_SQL}
+                    </pre>
+                  </div>
+                )}
+
+                {/* Supabase Orders List */}
+                {supabaseLoading && supabaseOrders.length === 0 ? (
+                  <div className="py-8 flex items-center justify-center gap-2 text-sm font-medium" style={{ color: 'var(--text-muted)' }}>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    {tx('กำลังโหลดรายการออเดอร์จาก Supabase...', 'Loading orders from Supabase...')}
+                  </div>
+                ) : filteredSupabaseOrders.length === 0 ? (
+                  <p className="text-xs text-center py-6 rounded-2xl border border-dashed" style={{ borderColor: 'var(--border-soft)', color: 'var(--text-muted)' }}>
+                    {tx('ยังไม่มีออเดอร์ในหมวดนี้ค่ะ', 'No orders found in this filter')}
+                  </p>
+                ) : (
+                  <div className="space-y-3 max-h-[28rem] overflow-y-auto pr-1">
+                    {filteredSupabaseOrders.map((order) => {
+                      const statusLower = String(order.status || 'pending').toLowerCase();
+                      const statusStyle =
+                        statusLower === 'completed'
+                          ? { bg: '#DBEAFE', text: '#1E40AF', label: tx('เสร็จสิ้น (completed)', 'completed') }
+                          : statusLower === 'paid'
+                            ? { bg: '#DCFCE7', text: '#166534', label: tx('ชำระแล้ว (paid)', 'paid') }
+                            : statusLower === 'cancelled'
+                              ? { bg: '#FFE4E6', text: '#BE123C', label: tx('ยกเลิก (cancelled)', 'cancelled') }
+                              : { bg: '#FEF3C7', text: '#92400E', label: tx('รอตรวจสอบ (pending)', 'pending') };
+
+                      const safeSlip = isSafeHttpUrl(order.slip_url) ? order.slip_url! : '';
+                      const createdLabel = order.created_at
+                        ? new Date(order.created_at).toLocaleString('th-TH')
+                        : '-';
+                      const itemsArr = Array.isArray(order.items) ? order.items : [];
+                      const isUpdating = updatingOrderId === order.id;
+
+                      return (
+                        <div
+                          key={String(order.id)}
+                          className="rounded-2xl border p-3.5 space-y-3"
+                          style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                        >
+                          <div className="flex flex-wrap items-start justify-between gap-3">
+                            <div className="min-w-0 flex-1 space-y-1.5">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <span className="font-num font-extrabold text-sm" style={{ color: 'var(--text-main)' }}>
+                                  #{String(order.id)}
+                                </span>
+                                <span
+                                  className="px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                                  style={{ backgroundColor: statusStyle.bg, color: statusStyle.text }}
+                                >
+                                  {statusStyle.label}
+                                </span>
+                                <span
+                                  className="px-2 py-0.5 rounded-lg text-[11px] font-semibold"
+                                  style={{
+                                    backgroundColor: order.payment_method === 'cash' ? '#F3F4F6' : '#E0F2FE',
+                                    color: order.payment_method === 'cash' ? '#374151' : '#0369A1',
+                                  }}
+                                >
+                                  {order.payment_method === 'cash'
+                                    ? tx('💵 เงินสด (cash)', '💵 Cash')
+                                    : tx('💳 โอนเงิน (transfer)', '💳 Transfer')}
+                                </span>
+                                <span className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                                  {createdLabel}
+                                </span>
+                              </div>
+
+                              {/* Itemized Order Lines */}
+                              <div className="space-y-0.5 text-xs">
+                                {itemsArr.length > 0 ? (
+                                  itemsArr.map((it, idx) => (
+                                    <p key={idx} style={{ color: 'var(--text-main)' }}>
+                                      • {it.name}
+                                      {it.tasteNote ? ` (${it.tasteNote})` : ''}{' '}
+                                      <span className="font-num font-semibold" style={{ color: 'var(--text-muted)' }}>
+                                        ×{it.qty} (฿{Number(it.subtotal ?? it.price * it.qty).toLocaleString('th-TH')})
+                                      </span>
+                                    </p>
+                                  ))
+                                ) : (
+                                  <p style={{ color: 'var(--text-muted)' }}>-</p>
+                                )}
+                              </div>
+
+                              <p className="font-num text-base font-extrabold" style={{ color: 'var(--accent-text)' }}>
+                                {tx('ยอดรวม:', 'Total:')} ฿{Number(order.total_amount || 0).toLocaleString('th-TH')}
+                              </p>
+                            </div>
+
+                            {/* Slip Thumbnail from Supabase Storage */}
+                            {safeSlip && (
+                              <div className="shrink-0 flex flex-col items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    playSoftClick();
+                                    setPreviewBill({
+                                      id: String(order.id),
+                                      timestamp: createdLabel,
+                                      totalAmount: Number(order.total_amount || 0),
+                                      staffName:
+                                        order.payment_method === 'cash' ? 'cash' : 'transfer',
+                                      deliveryInfo: `Status: ${order.status}`,
+                                      slipImageUrl: safeSlip,
+                                    });
+                                  }}
+                                  className="w-20 h-24 rounded-xl border-2 overflow-hidden bg-white cursor-pointer hover:opacity-90"
+                                  style={{ borderColor: 'var(--accent-primary)' }}
+                                  title={tx('แตะเพื่อดูรูปสลิปขนาดใหญ่', 'Tap to inspect slip')}
+                                >
+                                  <img
+                                    src={safeSlip}
+                                    alt={tx(`สลิปออเดอร์ #${order.id}`, `Slip #${order.id}`)}
+                                    className="w-full h-full object-cover"
+                                  />
+                                </button>
+                                <a
+                                  href={safeSlip}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="text-[10px] font-bold inline-flex items-center gap-0.5 hover:underline"
+                                  style={{ color: 'var(--accent-text)' }}
+                                >
+                                  {tx('เปิดสลิปเต็ม', 'Full Image')}
+                                  <ExternalLink className="w-2.5 h-2.5" />
+                                </a>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Status Action Controls */}
+                          <div className="pt-2 border-t flex flex-wrap items-center gap-1.5" style={{ borderColor: 'var(--border-soft)' }}>
+                            <span className="text-[11px] font-semibold mr-1" style={{ color: 'var(--text-muted)' }}>
+                              {tx('เปลี่ยนสถานะ:', 'Set status:')}
+                            </span>
+                            <button
+                              type="button"
+                              disabled={isUpdating || statusLower === 'paid'}
+                              onClick={() => void handleChangeSupabaseOrderStatus(order.id, 'paid')}
+                              className="px-2.5 py-1 rounded-xl text-[11px] font-bold text-white flex items-center gap-1 cursor-pointer disabled:opacity-45"
+                              style={{ backgroundColor: '#16A34A' }}
+                            >
+                              <Check className="w-3 h-3" />
+                              {tx('ชำระแล้ว (paid)', 'paid')}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isUpdating || statusLower === 'completed'}
+                              onClick={() => void handleChangeSupabaseOrderStatus(order.id, 'completed')}
+                              className="px-2.5 py-1 rounded-xl text-[11px] font-bold text-white flex items-center gap-1 cursor-pointer disabled:opacity-45"
+                              style={{ backgroundColor: '#0284C7' }}
+                            >
+                              <CheckCircle2 className="w-3 h-3" />
+                              {tx('เสร็จสิ้น (completed)', 'completed')}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={isUpdating || statusLower === 'pending'}
+                              onClick={() => void handleChangeSupabaseOrderStatus(order.id, 'pending')}
+                              className="px-2.5 py-1 rounded-xl border text-[11px] font-bold flex items-center gap-1 cursor-pointer disabled:opacity-45"
+                              style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)', color: '#92400E' }}
+                            >
+                              <Clock className="w-3 h-3" />
+                              {tx('รอตรวจ (pending)', 'pending')}
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
               {/* 2-Shop Daily Summary Cards */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">

@@ -896,6 +896,86 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
             </div>
           </div>
 
+          {/* 1.5 การ์ดตกแต่งคิวอาร์โค้ด LINE ร้านสำหรับลูกค้าเพิ่มเพื่อน & ส่งเมนูเข้า LINE */}
+          {(lineQrImageUrl || /^https?:\/\//i.test(lineShopUrl.trim())) && (
+            <div
+              className="rounded-3xl border-2 p-4 shadow-sm space-y-3"
+              style={{
+                background: 'linear-gradient(135deg, #F0FDF4 0%, #FFFDF9 100%)',
+                borderColor: '#86EFAC',
+              }}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span
+                    className="w-8 h-8 rounded-xl flex items-center justify-center text-white shrink-0 shadow-xs"
+                    style={{ backgroundColor: '#06C755' }}
+                  >
+                    <MessageCircle className="w-4 h-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <h3 className="text-sm font-bold truncate" style={{ color: '#14532D' }}>
+                      {tx(`สั่งผ่าน LINE · ${foodShopNameTh}`, `LINE Order · ${foodShopNameEn}`)}
+                    </h3>
+                    <p className="text-[11px] truncate" style={{ color: '#15803D' }}>
+                      {tx('สแกนหรือกดเพิ่มเพื่อนเพื่อส่งเมนูเข้าแชทร้าน', 'Scan or tap Add Friend to send your order')}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3">
+                {lineQrImageUrl && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSoftClick();
+                      setLineQrModalOpen(true);
+                    }}
+                    className="group relative w-24 h-24 rounded-2xl border-2 bg-white p-1.5 shrink-0 shadow-xs cursor-pointer transition-transform active:scale-95"
+                    style={{ borderColor: '#4ADE80' }}
+                    title={tx('แตะเพื่อขยายคิวอาร์โค้ด LINE ร้าน', 'Tap to enlarge Shop LINE QR')}
+                  >
+                    <img
+                      src={lineQrImageUrl}
+                      alt={tx('คิวอาร์โค้ด LINE ร้าน', 'Shop LINE QR Code')}
+                      className="w-full h-full object-contain rounded-lg"
+                    />
+                    <span className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 px-2 py-0.5 rounded-full text-[9px] font-bold bg-[#16A34A] text-white whitespace-nowrap shadow-xs">
+                      {tx('แตะขยาย', 'Zoom')}
+                    </span>
+                  </button>
+                )}
+
+                <div className="flex-1 min-w-0 space-y-2">
+                  <ol className="text-[11px] space-y-1 font-medium" style={{ color: '#166534' }}>
+                    <li>
+                      {tx('1. กดเพิ่มเพื่อนหรือสแกน QR (ครั้งแรก)', '1. Tap Add Friend or scan QR once')}
+                    </li>
+                    <li>
+                      {tx('2. เลือกอาหาร แล้วกด "ส่งเมนูอาหารเข้า LINE ร้าน"', '2. Pick dishes & tap "Send Order to Shop LINE"')}
+                    </li>
+                  </ol>
+
+                  {/^https?:\/\//i.test(lineShopUrl.trim()) && (
+                    <a
+                      href={lineShopUrl.trim()}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={() => playSoftClick()}
+                      className="w-full h-9 px-3 rounded-xl font-bold text-xs text-white flex items-center justify-center gap-1.5 shadow-xs transition-transform active:scale-95"
+                      style={{ backgroundColor: '#06C755' }}
+                    >
+                      <MessageCircle className="w-3.5 h-3.5 shrink-0" />
+                      <span>{tx('เพิ่มเพื่อน LINE ร้าน', 'Add Shop LINE')}</span>
+                      <ExternalLink className="w-3 h-3 opacity-85 shrink-0" />
+                    </a>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* 2. หน้าจัดการออเดอร์ & ตรวจสลิป (ฝั่งร้านค้า / คิวจัดส่ง) */}
           <div
             className="rounded-3xl border p-5 shadow-sm space-y-4"
@@ -1466,19 +1546,34 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
           onClick={() => setLineQrModalOpen(false)}
         >
           <div
-            className="w-full max-w-sm rounded-3xl border shadow-2xl overflow-hidden p-5 space-y-4 text-center"
-            style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+            className="w-full max-w-sm rounded-3xl border-2 shadow-2xl overflow-hidden p-5 space-y-4 text-center"
+            style={{
+              background: 'linear-gradient(180deg, #F0FDF4 0%, #FFFDF9 38%)',
+              borderColor: '#86EFAC',
+            }}
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between gap-2">
-              <h4 className="font-bold text-base flex items-center gap-2" style={{ color: '#15803D' }}>
-                <MessageCircle className="w-5 h-5" />
-                {tx(`LINE ร้าน (${foodShopNameTh})`, `Shop LINE (${foodShopNameEn})`)}
-              </h4>
+              <div className="flex items-center gap-2 text-left min-w-0">
+                <span
+                  className="w-9 h-9 rounded-xl flex items-center justify-center text-white shrink-0"
+                  style={{ backgroundColor: '#06C755' }}
+                >
+                  <MessageCircle className="w-5 h-5" />
+                </span>
+                <div className="min-w-0">
+                  <h4 className="font-bold text-sm truncate" style={{ color: '#14532D' }}>
+                    {tx(`LINE ร้าน ${foodShopNameTh}`, `Shop LINE · ${foodShopNameEn}`)}
+                  </h4>
+                  <p className="text-[11px] truncate" style={{ color: '#15803D' }}>
+                    {tx('สแกนหรือกดเพิ่มเพื่อนเพื่อสั่งอาหาร', 'Scan or tap Add Friend to order')}
+                  </p>
+                </div>
+              </div>
               <button
                 type="button"
                 onClick={() => setLineQrModalOpen(false)}
-                className="w-9 h-9 rounded-xl border flex items-center justify-center cursor-pointer"
+                className="w-9 h-9 rounded-xl border flex items-center justify-center cursor-pointer shrink-0"
                 style={{ backgroundColor: 'var(--bg-canvas)', borderColor: 'var(--border-soft)' }}
                 aria-label={tx('ปิด', 'Close')}
               >
@@ -1486,22 +1581,39 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
               </button>
             </div>
 
-            <div className="rounded-2xl border bg-white p-3 flex justify-center" style={{ borderColor: '#86EFAC' }}>
+            <div className="rounded-3xl border-2 bg-white p-3.5 flex flex-col items-center gap-1.5 shadow-sm" style={{ borderColor: '#4ADE80' }}>
               <img
                 src={lineQrImageUrl}
                 alt={tx('คิวอาร์โค้ด LINE ร้าน', 'Shop LINE QR Code')}
                 className="w-60 h-60 object-contain rounded-xl"
               />
+              <span className="text-[11px] font-bold" style={{ color: '#15803D' }}>
+                🍲 {foodShopNameTh} · {tx('คิวอาร์โค้ดเพิ่มเพื่อน LINE', 'Add Friend QR')}
+              </span>
             </div>
 
             <p className="text-xs leading-relaxed" style={{ color: 'var(--text-muted)' }}>
               {tx(
-                'สแกนคิวอาร์โค้ดเพื่อเพิ่มเพื่อน LINE ร้าน แล้วกดปุ่ม "คัดลอกรายการอาหาร" ไปวางส่งในแชทได้เลยค่ะ',
-                'Scan this QR to add our LINE shop, then copy & paste your order summary in chat!'
+                'สแกนคิวอาร์โค้ดหรือกดปุ่มเพิ่มเพื่อนด้านล่าง แล้วกดส่ง / วางรายการอาหารในแชทร้านได้เลยค่ะ',
+                'Scan QR or tap Add Friend below, then send or paste your food order in chat!'
               )}
             </p>
 
             <div className="flex flex-col gap-2">
+              {/^https?:\/\//i.test(lineShopUrl.trim()) && (
+                <a
+                  href={lineShopUrl.trim()}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => playSoftClick()}
+                  className="w-full h-11 rounded-2xl font-bold text-sm text-white flex items-center justify-center gap-2 shadow-sm"
+                  style={{ backgroundColor: '#06C755' }}
+                >
+                  <MessageCircle className="w-4 h-4" />
+                  {tx('เปิดแอป LINE เพื่อเพิ่มเพื่อนทันที', 'Open LINE to Add Friend')}
+                  <ExternalLink className="w-3.5 h-3.5 opacity-90" />
+                </a>
+              )}
               {cartTotal > 0 && (
                 <button
                   type="button"
@@ -1521,24 +1633,12 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                     await copyOrderTextToClipboard(summary);
                     setLineCopiedNotice(true);
                   }}
-                  className="w-full h-11 rounded-2xl font-bold text-sm text-white flex items-center justify-center gap-2 cursor-pointer"
-                  style={{ backgroundColor: '#16A34A' }}
+                  className="w-full h-11 rounded-2xl border font-bold text-sm flex items-center justify-center gap-2 cursor-pointer"
+                  style={{ backgroundColor: '#DCFCE7', borderColor: '#4ADE80', color: '#15803D' }}
                 >
                   <Copy className="w-4 h-4" />
                   {tx('คัดลอกรายการอาหารที่เลือกไว้ ✓', 'Copy Order Summary ✓')}
                 </button>
-              )}
-              {/^https?:\/\//i.test(lineShopUrl.trim()) && (
-                <a
-                  href={lineShopUrl.trim()}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full h-11 rounded-2xl border font-bold text-sm flex items-center justify-center gap-2"
-                  style={{ backgroundColor: 'var(--bg-canvas)', borderColor: '#4ADE80', color: '#15803D' }}
-                >
-                  <ExternalLink className="w-4 h-4" />
-                  {tx('เปิดลิงก์ LINE ร้าน', 'Open Shop LINE Link')}
-                </a>
               )}
             </div>
           </div>
