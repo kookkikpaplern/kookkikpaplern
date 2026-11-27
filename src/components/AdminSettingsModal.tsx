@@ -73,6 +73,7 @@ import {
   fetchOrdersFromSupabase,
   isSafeHttpUrl,
   SUPABASE_SETUP_SQL,
+  SUPABASE_URL_DISPLAY,
   SupabaseOrderRow,
   updateOrderStatusInSupabase,
 } from '../utils/supabaseClient';
@@ -2865,15 +2866,20 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                   >
                     <p className="font-bold">
                       {tx(
-                        `ไม่สามารถดึงข้อมูลจาก Supabase ได้: ${supabaseError}`,
-                        `Supabase error: ${supabaseError}`
+                        `ไม่สามารถเชื่อมต่อ Supabase (${SUPABASE_URL_DISPLAY}) ได้: ${supabaseError}`,
+                        `Supabase connection error (${SUPABASE_URL_DISPLAY}): ${supabaseError}`
                       )}
                     </p>
                     <p>
-                      {tx(
-                        'หากเพิ่งเชื่อมต่อครั้งแรก กรุณานำ SQL ด้านล่างไปรันใน Supabase SQL Editor เพื่อสร้างตาราง orders และ bucket "slips" นะคะ',
-                        'If this is your first setup, run the SQL below in Supabase SQL Editor to create the "orders" table and "slips" bucket.'
-                      )}
+                      {supabaseError.toLowerCase().includes('fetch') || supabaseError.toLowerCase().includes('abort')
+                        ? tx(
+                            'ระบบตรวจพบว่าไม่พบโดเมน Project URL นี้ใน DNS (ปกติรหัสโปรเจกต์ Supabase จะมี 20 ตัวอักษร แต่ลิงก์ปัจจุบันมี 19 ตัวอักษร) กรุณาคัดลอก Project URL ที่ถูกต้องจาก Supabase > Settings > Data API มาแจ้งในแชทเพื่อให้เชื่อมต่อให้ใหม่ได้ทันทีค่ะ (ระหว่างนี้ออเดอร์ออนไลน์หน้าร้านยังเข้าได้ตามปกติค่ะ)',
+                            'DNS lookup failed for this Project URL (Supabase refs are normally 20 chars; this one is 19). Please check Settings > Data API in Supabase and share the exact URL. Live web orders continue arriving normally.'
+                          )
+                        : tx(
+                            'หากเพิ่งเชื่อมต่อครั้งแรก กรุณานำ SQL ด้านล่างไปรันใน Supabase SQL Editor เพื่อสร้างตาราง orders และ bucket "slips" นะคะ',
+                            'If this is your first setup, run the SQL below in Supabase SQL Editor to create the "orders" table and "slips" bucket.'
+                          )}
                     </p>
                   </div>
                 )}

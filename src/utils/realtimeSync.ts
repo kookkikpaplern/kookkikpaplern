@@ -22,7 +22,7 @@ interface UseRealtimeShopSyncOptions {
   onRemoteOrderCreated: (order: CustomerQueueOrder, fromRemote: boolean) => void;
   onRemoteOrderUpdated: (
     orderId: string,
-    patch: Partial<Pick<CustomerQueueOrder, 'accepted' | 'status'>>
+    patch: Partial<Pick<CustomerQueueOrder, 'accepted' | 'status' | 'slip_url' | 'slipImageUrl' | 'supabaseOrderId'>>
   ) => void;
   onRemoteConfigUpdated: (payload: SharedShopConfigPayload) => void;
   onRemoteReceiptCreated?: (receipt: ReceiptSlipRecord) => void;
@@ -144,7 +144,9 @@ export function useRealtimeShopSync({
             if (data.type === 'sync:order-updated' && data.orderId && data.patch) {
               callbacksRef.current.onRemoteOrderUpdated(
                 data.orderId,
-                data.patch as Partial<Pick<CustomerQueueOrder, 'accepted' | 'status'>>
+                data.patch as Partial<
+                  Pick<CustomerQueueOrder, 'accepted' | 'status' | 'slip_url' | 'slipImageUrl' | 'supabaseOrderId'>
+                >
               );
               return;
             }
@@ -234,7 +236,10 @@ export function useRealtimeShopSync({
   );
 
   const broadcastOrderUpdated = useCallback(
-    (orderId: string, patch: Partial<Pick<CustomerQueueOrder, 'accepted' | 'status'>>) => {
+    (
+      orderId: string,
+      patch: Partial<Pick<CustomerQueueOrder, 'accepted' | 'status' | 'slip_url' | 'slipImageUrl' | 'supabaseOrderId'>>
+    ) => {
       sendRaw({
         type: 'sync:order-update',
         orderId,

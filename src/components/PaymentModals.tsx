@@ -473,14 +473,27 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
     let uploadedPublicUrl = '';
     try {
       const uploadTask = (async () => {
-        const firstTry = await uploadSlipToSupabase(file);
-        if (firstTry.publicUrl) return firstTry.publicUrl;
-        const fallbackTry = await uploadSlipToSupabase(compressed);
-        return fallbackTry.publicUrl || '';
+        try {
+          const firstTry = await uploadSlipToSupabase(file);
+          if (firstTry.publicUrl) return firstTry.publicUrl;
+          const errLower = (firstTry.error || '').toLowerCase();
+          if (errLower.includes('failed to fetch') || errLower.includes('abort') || errLower.includes('network')) {
+            return '';
+          }
+          const fallbackTry = await uploadSlipToSupabase(compressed);
+          return fallbackTry.publicUrl || '';
+        } catch {
+          return '';
+        }
       })();
 
-      const [resolvedUrl, verifyRes] = await Promise.all([
+      const boundedUploadTask = Promise.race<string>([
         uploadTask,
+        new Promise<string>((resolve) => window.setTimeout(() => resolve(''), 3500)),
+      ]);
+
+      const [resolvedUrl, verifyRes] = await Promise.all([
+        boundedUploadTask,
         fetch('/api/verify-slip', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

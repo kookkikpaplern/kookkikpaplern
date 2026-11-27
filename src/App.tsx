@@ -1385,7 +1385,6 @@ export default function App() {
       const issuedTimestamp = new Date().toLocaleString('th-TH');
       const issuedIso = new Date().toISOString();
 
-      // Upload slip to Supabase Storage ("slips" bucket) and insert order into "orders" table
       const supabasePaymentMethod: 'cash' | 'transfer' =
         checkoutState.method === 'เงินสด' ? 'cash' : 'transfer';
       const supabaseItems: SupabaseOrderItem[] =
@@ -1407,30 +1406,12 @@ export default function App() {
               },
             ];
 
-      let resolvedSlipUrl: string | null =
+      const preUploadedSlipUrl: string | null =
         supabasePaymentMethod === 'cash'
           ? null
           : slipMeta?.slipPublicUrl && isSafeHttpUrl(slipMeta.slipPublicUrl)
             ? slipMeta.slipPublicUrl.trim()
             : null;
-
-      if (supabasePaymentMethod === 'transfer' && !resolvedSlipUrl && cleanSlip) {
-        const uploaded = await uploadSlipToSupabase(cleanSlip);
-        if (uploaded.publicUrl) {
-          resolvedSlipUrl = uploaded.publicUrl;
-        }
-      }
-
-      const { order: savedSupabaseOrder } = await insertOrderToSupabase({
-        items: supabaseItems,
-        total_amount: totalAmt,
-        payment_method: supabasePaymentMethod,
-        slip_url: resolvedSlipUrl,
-        status: 'pending',
-      });
-      if (savedSupabaseOrder) {
-        setSupabaseOrdersVersion((v) => v + 1);
-      }
 
       let createdOrderObj: CustomerQueueOrder | null = null;
       if (isKrua && menuCart.length > 0) {
@@ -1442,7 +1423,6 @@ export default function App() {
         createdOrderObj = {
           queueNo: nextQueueNo,
           orderId: billId,
-          supabaseOrderId: savedSupabaseOrder?.id,
           items: menuCart,
           totalAmount: totalAmt,
           totalStars,
@@ -1451,8 +1431,8 @@ export default function App() {
           paymentMethod: checkoutState.method,
           customerName: cleanCustomerName || undefined,
           dropPoint: resolvedDropPoint,
-          slipImageUrl: resolvedSlipUrl || cleanSlip,
-          slip_url: resolvedSlipUrl || undefined,
+          slipImageUrl: preUploadedSlipUrl || cleanSlip,
+          slip_url: preUploadedSlipUrl || undefined,
           slipVerifyStatus: slipMeta?.verifyStatus,
           slipDetectedAmount: slipMeta?.detectedAmount,
           slipTransactionRef: slipMeta?.transactionRef,
@@ -1462,7 +1442,7 @@ export default function App() {
           status: 'กำลังทำ',
         };
 
-        // Always push over HTTP endpoint first so duplicate slip refs are blocked & mobile WS drops never lose orders
+        // Push immediately over HTTP endpoint so duplicate slip refs are blocked & staff POS gets instant delivery
         try {
           const httpRes = await fetch('/api/sync/order', {
             method: 'POST',
@@ -1487,8 +1467,7 @@ export default function App() {
             if (okJson.order) {
               createdOrderObj = {
                 ...okJson.order,
-                slip_url: okJson.order.slip_url || resolvedSlipUrl || undefined,
-                supabaseOrderId: okJson.order.supabaseOrderId ?? savedSupabaseOrder?.id,
+                slip_url: okJson.order.slip_url || preUploadedSlipUrl || undefined,
               };
             }
           }
@@ -1535,7 +1514,7 @@ export default function App() {
         totalStars,
         itemsSummary,
         deliveryInfo: deliveryWithBank,
-        slipImageUrl: resolvedSlipUrl || cleanSlip,
+        slipImageUrl: preUploadedSlipUrl || cleanSlip,
       });
 
       if (issuedReceipt) {
@@ -1545,20 +1524,17 @@ export default function App() {
 
       if (createdOrderObj) {
         knownOrderIdsRef.current.add(createdOrderObj.orderId);
-        if (createdOrderObj.supabaseOrderId != null) {
-          knownOrderIdsRef.current.add(`sb:${String(createdOrderObj.supabaseOrderId)}`);
-        }
         setQueueOrders((prev) => [...prev, createdOrderObj!]);
         syncBroadcastRef.current.broadcastOrderCreated(createdOrderObj);
 
         postToSheets(scriptUrl, 'ออเดอร์ออนไลน์', {
           ...createdOrderObj,
           bankAccount: cleanBank,
-          slipImageUrl: resolvedSlipUrl || cleanSlip || '',
+          slipImageUrl: preUploadedSlipUrl || cleanSlip || '',
           slipStatus:
             slipMeta?.verifyStatus === 'verified'
               ? 'AI ตรวจสลิปตรงยอด'
-              : resolvedSlipUrl || cleanSlip
+              : preUploadedSlipUrl || cleanSlip
                 ? 'แนบสลิปแล้ว (รอตรวจ)'
                 : 'ส่งสลิปทาง LINE (รอตรวจ)',
         });
@@ -1574,14 +1550,14 @@ export default function App() {
         totalAmount: totalAmt,
         totalStars,
         itemsSummary,
-        deliveryInfo: resolvedSlipUrl || cleanSlip ? `${deliveryWithBank} [แนบสลิปแล้ว]` : deliveryWithBank,
+        deliveryInfo: preUploadedSlipUrl || cleanSlip ? `${deliveryWithBank} [แนบสลิปแล้ว]` : deliveryWithBank,
         slipStatus:
           slipMeta?.verifyStatus === 'verified'
             ? 'AI ตรวจสลิปตรงยอด'
-            : resolvedSlipUrl || cleanSlip
+            : preUploadedSlipUrl || cleanSlip
               ? 'แนบสลิปแล้ว'
               : 'ไม่มีสลิป',
-        slipImageUrl: resolvedSlipUrl || cleanSlip || '',
+        slipImageUrl: preUploadedSlipUrl || cleanSlip || '',
       });
 
       if (checkoutState.source === 'calculator') {
@@ -1597,6 +1573,50 @@ export default function App() {
         receipt: issuedReceipt,
         pendingOrderId: !isStaffOrder && createdOrderObj ? createdOrderObj.orderId : null,
       }));
+
+      // Sync to Supabase ("slips" bucket + "orders" table) non-blocking in background, then patch order record
+      const targetOrderId = createdOrderObj?.orderId;
+      void (async () => {
+        try {
+          let resolvedSlipUrl: string | null = preUploadedSlipUrl;
+          if (supabasePaymentMethod === 'transfer' && !resolvedSlipUrl && cleanSlip) {
+            const uploaded = await uploadSlipToSupabase(cleanSlip);
+            if (uploaded.publicUrl) {
+              resolvedSlipUrl = uploaded.publicUrl;
+            }
+          }
+
+          const { order: savedSupabaseOrder } = await insertOrderToSupabase({
+            items: supabaseItems,
+            total_amount: totalAmt,
+            payment_method: supabasePaymentMethod,
+            slip_url: resolvedSlipUrl,
+            status: 'pending',
+          });
+
+          if (savedSupabaseOrder) {
+            setSupabaseOrdersVersion((v) => v + 1);
+            if (targetOrderId) {
+              knownOrderIdsRef.current.add(`sb:${String(savedSupabaseOrder.id)}`);
+              const patch: Partial<CustomerQueueOrder> = {
+                supabaseOrderId: savedSupabaseOrder.id,
+                ...(resolvedSlipUrl ? { slip_url: resolvedSlipUrl } : {}),
+              };
+              setQueueOrders((prev) =>
+                prev.map((q) => (q.orderId === targetOrderId ? { ...q, ...patch } : q))
+              );
+              syncBroadcastRef.current.broadcastOrderUpdated(targetOrderId, patch);
+              fetch('/api/sync/order-update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ roomId: orgCode, orderId: targetOrderId, patch }),
+              }).catch(() => {});
+            }
+          }
+        } catch {
+          // Non-fatal: order is already delivered via HTTP/WebSocket & Sheets
+        }
+      })();
     },
     [
       currentUser,

@@ -1,8 +1,8 @@
 import { createClient } from '@supabase/supabase-js';
 
-const DEFAULT_SUPABASE_URL = 'https://kadhcobomdqiobrntlv.supabase.co';
+const DEFAULT_SUPABASE_URL = 'https://kadhcobomdqiobrnntlv.supabase.co';
 const DEFAULT_SUPABASE_PUBLISHABLE_KEY =
-  'sb_publishable_WvGv3CDfPK9dyoLJCu5Srw__i0180Xv';
+  'sb_publishable_WvGv3CDfPK9dyoLJCu5Srw__iO18OXv';
 
 const SUPABASE_URL =
   (typeof import.meta !== 'undefined' &&
@@ -14,13 +14,34 @@ const SUPABASE_PUBLISHABLE_KEY =
     import.meta.env?.VITE_SUPABASE_PUBLISHABLE_KEY?.trim()) ||
   DEFAULT_SUPABASE_PUBLISHABLE_KEY;
 
+export const SUPABASE_URL_DISPLAY = SUPABASE_URL;
 export const SUPABASE_SLIPS_BUCKET = 'slips';
 export const SUPABASE_ORDERS_TABLE = 'orders';
+
+const fetchWithTimeout: typeof fetch = async (input, init) => {
+  const controller = new AbortController();
+  const timeoutId = globalThis.setTimeout(() => controller.abort(), 8000);
+  if (init?.signal) {
+    if (init.signal.aborted) {
+      controller.abort();
+    } else {
+      init.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+  }
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    globalThis.clearTimeout(timeoutId);
+  }
+};
 
 export const supabase = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
   auth: {
     persistSession: false,
     autoRefreshToken: false,
+  },
+  global: {
+    fetch: fetchWithTimeout,
   },
 });
 
