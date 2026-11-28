@@ -15,8 +15,10 @@ import {
   Gift,
   ImagePlus,
   Loader2,
+  MapPin,
   MessageCircle,
   MessageCircleQuestion,
+  Navigation,
   Palette,
   Plus,
   QrCode,
@@ -58,6 +60,7 @@ import {
   getSilentVoidLogs,
   isCustomerItemMissingFromShop,
   postToSheets,
+  pruneExpiredLocalSalesData,
 } from '../utils/sheetsSync';
 import {
   downloadProductExcelXlsx,
@@ -70,14 +73,25 @@ import {
   extractLineOaId,
 } from '../utils/lineOrder';
 import {
+  cleanupExpiredOrdersInSupabase,
+  extractOrderMetaFromSupabaseOrder,
   fetchOrdersFromSupabase,
+  getLastSupabaseCleanupSummary,
   isSafeHttpUrl,
+  SALES_RETENTION_DAYS,
   SUPABASE_SETUP_SQL,
   SUPABASE_URL_DISPLAY,
+  SupabaseCleanupSummary,
   SupabaseOrderRow,
   updateOrderStatusInSupabase,
 } from '../utils/supabaseClient';
 import { playSoftClick } from '../utils/sound';
+import {
+  buildGoogleMapsPinUrl,
+  MAX_DELIVERY_RADIUS_KM,
+  ShopLocationConfig,
+} from '../utils/geoDistance';
+import { requestBrowserCurrentLocation, ShopOriginMapModal } from './DeliveryMapPicker';
 
 export type AdminSettingsTab = 'general' | 'products' | 'faq' | 'summary' | 'sheets';
 
@@ -142,6 +156,8 @@ interface AdminSettingsModalProps {
   onSyncAllNow: () => Promise<string>;
   onFlushQueueNow: () => Promise<number>;
   supabaseOrdersVersion?: number;
+  shopLocation: ShopLocationConfig | null;
+  onChangeShopLocation: (next: ShopLocationConfig | null) => void;
 }
 
 export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
@@ -205,6 +221,8 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   onSyncAllNow,
   onFlushQueueNow,
   supabaseOrdersVersion = 0,
+  shopLocation,
+  onChangeShopLocation,
 }) => {
   const { lang, tx } = useLang();
   const [activeTab, setActiveTab] = useState<AdminSettingsTab>(initialTab);
@@ -216,11 +234,17 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   const [supabaseLoading, setSupabaseLoading] = useState(false);
   const [supabaseError, setSupabaseError] = useState('');
   const [supabaseStatusFilter, setSupabaseStatusFilter] = useState<
-    'all' | 'pending' | 'paid' | 'completed'
+    'all' | 'pending' | 'paid' | 'completed' | 'test'
   >('all');
   const [updatingOrderId, setUpdatingOrderId] = useState<string | number | null>(null);
+  const [cleaningExpired, setCleaningExpired] = useState(false);
+  const [lastCleanupSummary, setLastCleanupSummary] = useState<SupabaseCleanupSummary | null>(() =>
+    getLastSupabaseCleanupSummary()
+  );
   const [showSqlHelper, setShowSqlHelper] = useState(false);
   const [copiedSqlSetup, setCopiedSqlSetup] = useState(false);
+  const [shopMapModalOpen, setShopMapModalOpen] = useState(false);
+  const [shopGpsBusy, setShopGpsBusy] = useState(false);
   const [previewBill, setPreviewBill] = useState<{
     id: string;
     timestamp: string;
@@ -235,12 +259,38 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
     setSupabaseError('');
     const { orders, error } = await fetchOrdersFromSupabase(100);
     setSupabaseLoading(false);
+    setLastCleanupSummary(getLastSupabaseCleanupSummary());
     if (error) {
       setSupabaseError(error);
       return;
     }
     setSupabaseOrders(orders);
   }, []);
+
+  const handleRunWeeklyCleanupNow = async () => {
+    playSoftClick();
+    setCleaningExpired(true);
+    try {
+      const localPruned = pruneExpiredLocalSalesData(SALES_RETENTION_DAYS);
+      const summary = await cleanupExpiredOrdersInSupabase(SALES_RETENTION_DAYS, true);
+      setLastCleanupSummary(summary);
+      if (summary.error) {
+        setSupabaseError(summary.error);
+      } else {
+        await loadSupabaseOrders();
+        const totalLocal =
+          localPruned.removedLogs + localPruned.removedReceipts + localPruned.removedVoids;
+        setStatusMsg(
+          tx(
+            `ล้างข้อมูลเกิน ${SALES_RETENTION_DAYS} วันเรียบร้อย: ลบใน Supabase ${summary.deletedOrders} ออเดอร์ / ${summary.deletedSlips} สลิป (ในเครื่อง ${totalLocal} รายการ)`,
+            `Cleaned up records older than ${SALES_RETENTION_DAYS} days: ${summary.deletedOrders} orders / ${summary.deletedSlips} slips in Supabase (${totalLocal} local).`
+          )
+        );
+      }
+    } finally {
+      setCleaningExpired(false);
+    }
+  };
 
   useEffect(() => {
     if (isOpen && activeTab === 'summary') {
@@ -275,6 +325,9 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
 
   const filteredSupabaseOrders = useMemo(() => {
     if (supabaseStatusFilter === 'all') return supabaseOrders;
+    if (supabaseStatusFilter === 'test') {
+      return supabaseOrders.filter((o) => Boolean(extractOrderMetaFromSupabaseOrder(o).isTestMode));
+    }
     return supabaseOrders.filter(
       (o) => String(o.status || 'pending').toLowerCase() === supabaseStatusFilter
     );
@@ -284,7 +337,13 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
     let pendingCount = 0;
     let paidRevenue = 0;
     let totalRevenue = 0;
+    let testCount = 0;
     supabaseOrders.forEach((o) => {
+      const meta = extractOrderMetaFromSupabaseOrder(o);
+      if (meta.isTestMode) {
+        testCount += 1;
+        return;
+      }
       const amt = Number(o.total_amount) || 0;
       const st = String(o.status || 'pending').toLowerCase();
       if (st !== 'cancelled') totalRevenue += amt;
@@ -296,6 +355,7 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
       pendingCount,
       paidRevenue,
       totalRevenue,
+      testCount,
     };
   }, [supabaseOrders]);
 
@@ -1289,6 +1349,162 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                     className="w-6 h-6 accent-emerald-600 cursor-pointer"
                   />
                 </label>
+              </div>
+
+              {/* Shop Origin Pin & 3 km Delivery Radius Panel */}
+              <div
+                className="rounded-3xl border-2 p-4 sm:p-5 space-y-3"
+                style={{
+                  backgroundColor: 'var(--bg-canvas)',
+                  borderColor: shopLocation ? '#6EE7B7' : '#FCD34D',
+                }}
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div>
+                    <h3 className="text-base font-bold flex items-center gap-2" style={{ color: 'var(--text-main)' }}>
+                      <MapPin className="w-5 h-5" style={{ color: '#0F766E' }} />
+                      {tx(
+                        `พิกัดร้านต้นทาง (เขตจัดส่งไม่เกิน ${MAX_DELIVERY_RADIUS_KM} กม.)`,
+                        `Shop Origin Pin (${MAX_DELIVERY_RADIUS_KM} km Delivery Limit)`
+                      )}
+                    </h3>
+                    <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                      {tx(
+                        `ลูกค้าที่เลือก "ให้พ่อไปส่ง" จะต้องปักหมุดภายในรัศมี ${MAX_DELIVERY_RADIUS_KM} กม. จากพิกัดร้านนี้ค่ะ`,
+                        `Customers selecting delivery must drop a pin within ${MAX_DELIVERY_RADIUS_KM} km of this shop coordinate.`
+                      )}
+                    </p>
+                  </div>
+                  {shopLocation ? (
+                    <span
+                      className="px-2.5 py-1 rounded-xl text-[11px] font-bold"
+                      style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
+                    >
+                      {tx('✅ ตั้งพิกัดร้านแล้ว', '✅ Origin Set')}
+                    </span>
+                  ) : (
+                    <span
+                      className="px-2.5 py-1 rounded-xl text-[11px] font-bold"
+                      style={{ backgroundColor: '#FEF3C7', color: '#92400E' }}
+                    >
+                      {tx('⚠️ ยังไม่ได้ปักพิกัดร้าน', '⚠️ Not Set Yet')}
+                    </span>
+                  )}
+                </div>
+
+                {shopLocation ? (
+                  <div
+                    className="rounded-2xl border px-3.5 py-2.5 text-xs flex flex-wrap items-center justify-between gap-2"
+                    style={{
+                      backgroundColor: 'var(--bg-card)',
+                      borderColor: 'var(--border-soft)',
+                      color: 'var(--text-main)',
+                    }}
+                  >
+                    <div className="space-y-0.5">
+                      <p className="font-bold">
+                        {shopLocation.label || shopNameTh}
+                      </p>
+                      <p className="font-num text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                        GPS: {shopLocation.lat.toFixed(6)}, {shopLocation.lng.toFixed(6)} · {tx(`รัศมี ${MAX_DELIVERY_RADIUS_KM} กม.`, `${MAX_DELIVERY_RADIUS_KM} km radius`)}
+                      </p>
+                    </div>
+                    <a
+                      href={buildGoogleMapsPinUrl(shopLocation.lat, shopLocation.lng)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 text-xs font-bold hover:underline"
+                      style={{ color: '#0284C7' }}
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      {tx('ดูบน Google Maps', 'Open Maps')}
+                    </a>
+                  </div>
+                ) : (
+                  <p className="text-xs font-medium" style={{ color: '#92400E' }}>
+                    {tx(
+                      'กรุณากดปุ่มด้านล่างขณะอยู่ที่ร้าน หรือเปิดแผนที่เพื่อเลือกจุดตั้งร้าน ระบบจึงจะคำนวณระยะไม่เกิน 3 กม. ให้ลูกค้าได้ค่ะ',
+                      'Tap GPS while at the shop or open the map picker so customers can validate the 3 km radius.'
+                    )}
+                  </p>
+                )}
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={shopGpsBusy}
+                    onClick={async () => {
+                      playSoftClick();
+                      setShopGpsBusy(true);
+                      try {
+                        const pt = await requestBrowserCurrentLocation();
+                        onChangeShopLocation({
+                          lat: pt.lat,
+                          lng: pt.lng,
+                          label: shopLocation?.label || shopNameTh,
+                          updatedAt: new Date().toISOString(),
+                        });
+                        setStatusMsg(
+                          tx(
+                            `บันทึกพิกัดร้านสำเร็จแล้วค่ะ (${pt.lat.toFixed(5)}, ${pt.lng.toFixed(5)}) — รับส่งในรัศมี ${MAX_DELIVERY_RADIUS_KM} กม.`,
+                            `Saved shop coordinates (${pt.lat.toFixed(5)}, ${pt.lng.toFixed(5)}) for ${MAX_DELIVERY_RADIUS_KM} km radius.`
+                          )
+                        );
+                      } catch {
+                        setStatusMsg(
+                          tx(
+                            'ไม่สามารถดึง GPS อัตโนมัติได้ กรุณากด "เปิดแผนที่ปักหมุดร้าน" เพื่อเลือกตำแหน่งบนแผนที่ค่ะ',
+                            'Could not read GPS automatically. Tap "Open Map Pin Picker" to set it on the map.'
+                          )
+                        );
+                      } finally {
+                        setShopGpsBusy(false);
+                      }
+                    }}
+                    className="px-3.5 py-2.5 rounded-2xl text-xs sm:text-sm font-bold text-white flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                    style={{ backgroundColor: '#0F766E' }}
+                  >
+                    {shopGpsBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Navigation className="w-4 h-4" />}
+                    {tx('ใช้ GPS ตำแหน่งร้านตอนนี้', 'Set Shop GPS Now')}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playSoftClick();
+                      setShopMapModalOpen(true);
+                    }}
+                    className="px-3.5 py-2.5 rounded-2xl border text-xs sm:text-sm font-bold flex items-center gap-1.5 cursor-pointer"
+                    style={{
+                      backgroundColor: 'var(--bg-card)',
+                      borderColor: 'var(--accent-border)',
+                      color: 'var(--accent-text)',
+                    }}
+                  >
+                    <MapPin className="w-4 h-4" />
+                    {tx('เปิดแผนที่ปักหมุดร้าน (ดูวงกลม 3 กม.)', 'Open Map & 3 km Circle')}
+                  </button>
+
+                  {shopLocation && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playSoftClick();
+                        onChangeShopLocation(null);
+                        setStatusMsg(tx('ล้างพิกัดร้านเรียบร้อยค่ะ', 'Cleared shop coordinates.'));
+                      }}
+                      className="px-3 py-2.5 rounded-2xl border text-xs font-bold flex items-center gap-1 cursor-pointer"
+                      style={{
+                        backgroundColor: 'var(--bg-card)',
+                        borderColor: '#FDA4AF',
+                        color: '#BE123C',
+                      }}
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      {tx('ล้างพิกัด', 'Clear')}
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* Printable Customer Ordering QR Code & Poster Generator */}
@@ -2807,22 +3023,66 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                   </div>
                 </div>
 
+                {/* 7-Day Auto-Retention Banner & Manual Cleanup */}
+                <div
+                  className="rounded-2xl border px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2"
+                  style={{ backgroundColor: '#F0FDF4', borderColor: '#BBF7D0' }}
+                >
+                  <div className="min-w-0">
+                    <p className="text-xs font-bold text-emerald-900">
+                      {tx(
+                        `🧹 ลบรายการขาย & รูปสลิปที่เกิน ${SALES_RETENTION_DAYS} วัน (1 สัปดาห์) อัตโนมัติ`,
+                        `🧹 Auto-deletes sales & slip images older than ${SALES_RETENTION_DAYS} days`
+                      )}
+                    </p>
+                    <p className="text-[11px] text-emerald-700">
+                      {lastCleanupSummary?.ranAt
+                        ? tx(
+                            `ตรวจล้างล่าสุด: ${new Date(lastCleanupSummary.ranAt).toLocaleString('th-TH')} (ลบ ${lastCleanupSummary.deletedOrders} ออเดอร์ / ${lastCleanupSummary.deletedSlips} สลิป)`,
+                            `Last cleanup: ${new Date(lastCleanupSummary.ranAt).toLocaleString('en-US')} (${lastCleanupSummary.deletedOrders} orders / ${lastCleanupSummary.deletedSlips} slips)`
+                          )
+                        : tx(
+                            'ระบบจะกวาดล้างรายการเก่าเกิน 7 วันให้อัตโนมัติทุกวันทั้งบนคลาวด์และในเครื่องค่ะ',
+                            'Expired records older than 7 days are automatically cleaned up.'
+                          )}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={cleaningExpired}
+                    onClick={() => void handleRunWeeklyCleanupNow()}
+                    className="px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-60 shrink-0 bg-white text-emerald-800 border-emerald-300 hover:bg-emerald-50"
+                  >
+                    <Trash2 className={`w-3.5 h-3.5 ${cleaningExpired ? 'animate-pulse' : ''}`} />
+                    {cleaningExpired
+                      ? tx('กำลังล้าง...', 'Cleaning...')
+                      : tx('ล้างรายการเกิน 7 วันตอนนี้', 'Clean >7d Now')}
+                  </button>
+                </div>
+
                 {/* Live KPI Summary Row */}
                 <div className="grid grid-cols-3 gap-2.5">
                   <div className="rounded-2xl border p-3" style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}>
-                    <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>{tx('ออเดอร์ทั้งหมด', 'Total Orders')}</p>
+                    <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                      {tx('ออเดอร์ทั้งหมด', 'Total Orders')}
+                      {supabaseOrderStats.testCount > 0 && (
+                        <span className="ml-1 text-orange-600 font-semibold">
+                          ({tx(`ทดสอบ ${supabaseOrderStats.testCount}`, `${supabaseOrderStats.testCount} test`)})
+                        </span>
+                      )}
+                    </p>
                     <p className="font-num text-xl font-extrabold" style={{ color: 'var(--text-main)' }}>
                       {supabaseOrderStats.totalCount}
                     </p>
                   </div>
                   <div className="rounded-2xl border p-3" style={{ backgroundColor: '#FFFBEB', borderColor: '#FDE68A' }}>
-                    <p className="text-[11px] text-amber-800">{tx('รอตรวจ (pending)', 'Pending')}</p>
+                    <p className="text-[11px] text-amber-800">{tx('รอตรวจ (ยอดจริง)', 'Pending (Live)')}</p>
                     <p className="font-num text-xl font-extrabold text-amber-700">
                       {supabaseOrderStats.pendingCount}
                     </p>
                   </div>
                   <div className="rounded-2xl border p-3" style={{ backgroundColor: '#ECFDF5', borderColor: '#A7F3D0' }}>
-                    <p className="text-[11px] text-emerald-800">{tx('ยอดชำระแล้ว (paid/done)', 'Confirmed Revenue')}</p>
+                    <p className="text-[11px] text-emerald-800">{tx('ยอดชำระจริง (ไม่รวมทดสอบ)', 'Confirmed Live Revenue')}</p>
                     <p className="font-num text-xl font-extrabold text-emerald-700">
                       ฿{supabaseOrderStats.paidRevenue.toLocaleString('th-TH')}
                     </p>
@@ -2836,6 +3096,13 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                     { id: 'pending', label: tx('รอตรวจ (pending)', 'Pending') },
                     { id: 'paid', label: tx('ชำระแล้ว (paid)', 'Paid') },
                     { id: 'completed', label: tx('เสร็จสิ้น (completed)', 'Completed') },
+                    {
+                      id: 'test',
+                      label: tx(
+                        `🧪 ทดสอบระบบ (${supabaseOrderStats.testCount})`,
+                        `🧪 Test (${supabaseOrderStats.testCount})`
+                      ),
+                    },
                   ].map((f) => {
                     const active = supabaseStatusFilter === f.id;
                     return (
@@ -2844,7 +3111,9 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                         type="button"
                         onClick={() => {
                           playSoftClick();
-                          setSupabaseStatusFilter(f.id as 'all' | 'pending' | 'paid' | 'completed');
+                          setSupabaseStatusFilter(
+                            f.id as 'all' | 'pending' | 'paid' | 'completed' | 'test'
+                          );
                         }}
                         className="px-3 py-1.5 rounded-xl border text-xs font-bold cursor-pointer"
                         style={{
@@ -2943,20 +3212,41 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                         ? new Date(order.created_at).toLocaleString('th-TH')
                         : '-';
                       const itemsArr = Array.isArray(order.items) ? order.items : [];
+                      const meta = extractOrderMetaFromSupabaseOrder(order);
                       const isUpdating = updatingOrderId === order.id;
+
+                      const deliveryBadgeText = [
+                        meta.deliveryType,
+                        meta.tableNumber ? tx(`โต๊ะที่ ${meta.tableNumber}`, `Table ${meta.tableNumber}`) : '',
+                        meta.dropPoint ? meta.dropPoint : '',
+                      ]
+                        .filter(Boolean)
+                        .join(' • ');
 
                       return (
                         <div
                           key={String(order.id)}
                           className="rounded-2xl border p-3.5 space-y-3"
-                          style={{ backgroundColor: 'var(--bg-card)', borderColor: 'var(--border-soft)' }}
+                          style={{
+                            backgroundColor: 'var(--bg-card)',
+                            borderColor: meta.isTestMode ? '#FDBA74' : 'var(--border-soft)',
+                          }}
                         >
                           <div className="flex flex-wrap items-start justify-between gap-3">
                             <div className="min-w-0 flex-1 space-y-1.5">
                               <div className="flex flex-wrap items-center gap-1.5">
                                 <span className="font-num font-extrabold text-sm" style={{ color: 'var(--text-main)' }}>
                                   #{String(order.id)}
+                                  {meta.queueNo ? ` (คิว ${meta.queueNo})` : ''}
                                 </span>
+                                {meta.isTestMode && (
+                                  <span
+                                    className="px-2 py-0.5 rounded-lg text-[11px] font-bold"
+                                    style={{ backgroundColor: '#FFEDD5', color: '#C2410C' }}
+                                  >
+                                    {tx('🧪 ทดสอบระบบ', '🧪 Test Order')}
+                                  </span>
+                                )}
                                 <span
                                   className="px-2 py-0.5 rounded-lg text-[11px] font-bold"
                                   style={{ backgroundColor: statusStyle.bg, color: statusStyle.text }}
@@ -2978,6 +3268,87 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                                   {createdLabel}
                                 </span>
                               </div>
+
+                               {/* Essential Stored Metadata Chips */}
+                               {(meta.shopName ||
+                                 deliveryBadgeText ||
+                                 typeof meta.deliveryDistanceKm === 'number' ||
+                                 (typeof meta.deliveryLat === 'number' && typeof meta.deliveryLng === 'number') ||
+                                 meta.customerName ||
+                                 meta.staffName ||
+                                 meta.billId ||
+                                 meta.bankAccount) && (
+                                 <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                                   {meta.shopName && (
+                                     <span
+                                       className="px-2 py-0.5 rounded-md font-semibold"
+                                       style={{ backgroundColor: 'var(--bg-canvas)', color: 'var(--text-main)' }}
+                                     >
+                                       🏪 {meta.shopName}
+                                     </span>
+                                   )}
+                                   {deliveryBadgeText && (
+                                     <span
+                                       className="px-2 py-0.5 rounded-md font-semibold"
+                                       style={{ backgroundColor: '#FEF3C7', color: '#92400E' }}
+                                     >
+                                       📍 {deliveryBadgeText}
+                                     </span>
+                                   )}
+                                   {typeof meta.deliveryDistanceKm === 'number' && (
+                                     <span
+                                       className="px-2 py-0.5 rounded-md font-num font-bold"
+                                       style={{ backgroundColor: '#DCFCE7', color: '#166534' }}
+                                     >
+                                       📏 {tx(`ห่าง ${meta.deliveryDistanceKm.toFixed(2)} กม.`, `${meta.deliveryDistanceKm.toFixed(2)} km`)}
+                                     </span>
+                                   )}
+                                   {typeof meta.deliveryLat === 'number' && typeof meta.deliveryLng === 'number' && (
+                                     <a
+                                       href={buildGoogleMapsPinUrl(meta.deliveryLat, meta.deliveryLng)}
+                                       target="_blank"
+                                       rel="noopener noreferrer"
+                                       className="px-2 py-0.5 rounded-md font-bold inline-flex items-center gap-1 hover:underline"
+                                       style={{ backgroundColor: '#E0F2FE', color: '#0369A1' }}
+                                     >
+                                       <Navigation className="w-3 h-3" />
+                                       {tx('เปิดแผนที่นำทาง', 'Open Map Pin')}
+                                     </a>
+                                   )}
+                                   {meta.customerName && (
+                                     <span
+                                       className="px-2 py-0.5 rounded-md font-semibold"
+                                       style={{ backgroundColor: '#E0F2FE', color: '#0369A1' }}
+                                     >
+                                       👤 {meta.customerName}
+                                     </span>
+                                   )}
+                                   {meta.staffName && (
+                                     <span
+                                       className="px-2 py-0.5 rounded-md font-medium"
+                                       style={{ backgroundColor: '#F3F4F6', color: '#374151' }}
+                                     >
+                                       🧑‍💼 {meta.staffName}
+                                     </span>
+                                   )}
+                                   {meta.billId && (
+                                     <span
+                                       className="px-2 py-0.5 rounded-md font-num"
+                                       style={{ backgroundColor: 'var(--bg-canvas)', color: 'var(--text-muted)' }}
+                                     >
+                                       🧾 {meta.billId}
+                                     </span>
+                                   )}
+                                   {meta.bankAccount && (
+                                     <span
+                                       className="px-2 py-0.5 rounded-md"
+                                       style={{ backgroundColor: '#ECFDF5', color: '#065F46' }}
+                                     >
+                                       🏦 {meta.bankAccount}
+                                     </span>
+                                   )}
+                                 </div>
+                               )}
 
                               {/* Itemized Order Lines */}
                               <div className="space-y-0.5 text-xs">
@@ -3009,12 +3380,23 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                                   onClick={() => {
                                     playSoftClick();
                                     setPreviewBill({
-                                      id: String(order.id),
+                                      id: meta.billId || `#${String(order.id)}`,
                                       timestamp: createdLabel,
                                       totalAmount: Number(order.total_amount || 0),
                                       staffName:
-                                        order.payment_method === 'cash' ? 'cash' : 'transfer',
-                                      deliveryInfo: `Status: ${order.status}`,
+                                        meta.staffName ||
+                                        (order.payment_method === 'cash' ? 'cash' : 'transfer'),
+                                      deliveryInfo: [
+                                        deliveryBadgeText,
+                                        typeof meta.deliveryDistanceKm === 'number'
+                                          ? `ห่าง ${meta.deliveryDistanceKm.toFixed(2)} กม.`
+                                          : '',
+                                        meta.customerName ? `ลูกค้า: ${meta.customerName}` : '',
+                                        meta.bankAccount || '',
+                                        `Status: ${order.status}`,
+                                      ]
+                                        .filter(Boolean)
+                                        .join(' • '),
                                       slipImageUrl: safeSlip,
                                     });
                                   }}
@@ -3971,6 +4353,21 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
           </div>
         </div>
       )}
+      {/* Shop Origin Map Picker Modal */}
+      <ShopOriginMapModal
+        isOpen={shopMapModalOpen}
+        shopLocation={shopLocation}
+        onClose={() => setShopMapModalOpen(false)}
+        onSaveShopLocation={(next) => {
+          onChangeShopLocation(next);
+          setStatusMsg(
+            tx(
+              `บันทึกพิกัดร้านเรียบร้อยแล้วค่ะ (${next.lat.toFixed(5)}, ${next.lng.toFixed(5)})`,
+              `Saved shop coordinates (${next.lat.toFixed(5)}, ${next.lng.toFixed(5)}).`
+            )
+          );
+        }}
+      />
     </div>
   );
 };

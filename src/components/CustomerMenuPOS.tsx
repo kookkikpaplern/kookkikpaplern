@@ -6,11 +6,15 @@ import {
   Clock,
   Coffee,
   Copy,
+  Crosshair,
   ExternalLink,
   Eye,
   FileImage,
+  Loader2,
+  MapPin,
   MessageCircle,
   Minus,
+  Navigation,
   Plus,
   QrCode,
   RefreshCw,
@@ -35,6 +39,15 @@ import {
 import { BillLineItem, CustomerQueueOrder } from '../utils/sheetsSync';
 import { isSafeHttpUrl } from '../utils/supabaseClient';
 import {
+  buildGoogleMapsPinUrl,
+  computeHaversineMeters,
+  formatDistanceKm,
+  GeoPoint,
+  MAX_DELIVERY_RADIUS_KM,
+  MAX_DELIVERY_RADIUS_METERS,
+  ShopLocationConfig,
+} from '../utils/geoDistance';
+import {
   buildLineOrderText,
   buildLineSendHref,
   copyOrderTextToClipboard,
@@ -42,6 +55,10 @@ import {
 } from '../utils/lineOrder';
 import { playSoftClick } from '../utils/sound';
 import { MamaBearMascot, PapaBearVespaMascot } from './BearGangMascot';
+import {
+  DeliveryMapPickerModal,
+  requestBrowserCurrentLocation,
+} from './DeliveryMapPicker';
 
 interface CustomerMenuPOSProps {
   menuItems: MenuItem[];
@@ -54,6 +71,7 @@ interface CustomerMenuPOSProps {
   foodShopNameEn: string;
   lineShopUrl?: string;
   lineQrImageUrl?: string;
+  shopLocation?: ShopLocationConfig | null;
   isMerchantView?: boolean;
   initialTableNumber?: string;
   onAddMenuItem: (item: MenuItem, options?: { qty?: number; tasteNote?: string }) => void;
@@ -66,6 +84,9 @@ interface CustomerMenuPOSProps {
       tableNumber?: string;
       customerName: string;
       dropPoint: string;
+      deliveryLat?: number;
+      deliveryLng?: number;
+      deliveryDistanceKm?: number | null;
     }
   ) => void;
   onAcceptQueueOrder?: (orderId: string) => void;
@@ -111,6 +132,7 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
   foodShopNameEn,
   lineShopUrl = '',
   lineQrImageUrl = '',
+  shopLocation = null,
   isMerchantView = false,
   initialTableNumber = '',
   onAddMenuItem,
@@ -129,10 +151,22 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
   const [tableNumber, setTableNumber] = useState(() => initialTableNumber.trim());
   const [customerName, setCustomerName] = useState('');
   const [dropPoint, setDropPoint] = useState('');
+  const [deliveryPin, setDeliveryPin] = useState<GeoPoint | null>(null);
+  const [deliveryDistanceKm, setDeliveryDistanceKm] = useState<number | null>(null);
+  const [mapPickerOpen, setMapPickerOpen] = useState(false);
+  const [gpsQuickLoading, setGpsQuickLoading] = useState(false);
   const [orderFormError, setOrderFormError] = useState('');
   const tableInputRef = React.useRef<HTMLInputElement>(null);
   const customerNameInputRef = React.useRef<HTMLInputElement>(null);
   const dropPointInputRef = React.useRef<HTMLInputElement>(null);
+
+  const pinnedDistanceMeters = useMemo(() => {
+    if (!shopLocation || !deliveryPin) return null;
+    return computeHaversineMeters(shopLocation, deliveryPin);
+  }, [shopLocation, deliveryPin]);
+
+  const pinOutOfRange =
+    pinnedDistanceMeters !== null && pinnedDistanceMeters > MAX_DELIVERY_RADIUS_METERS;
 
   // Modal เลือกรสชาติสำหรับเมนูอาหาร
   const [selectedFoodItem, setSelectedFoodItem] = useState<MenuItem | null>(null);
@@ -638,7 +672,7 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                 )}
 
                 {deliveryType === 'ให้พ่อไปส่ง' && (
-                  <div className="space-y-2">
+                  <div className="space-y-2.5">
                     <input
                       ref={customerNameInputRef}
                       type="text"
@@ -664,7 +698,7 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                         setDropPoint(e.target.value);
                         if (orderFormError) setOrderFormError('');
                       }}
-                      placeholder={tx('จุดส่ง * (เช่น หน้าตึก 2 / บ้านเลขที่)', 'Drop-off spot * (e.g. Building 2 / House No.)')}
+                      placeholder={tx('จุดส่ง / บ้านเลขที่ * (เช่น หน้าตึก 2 / บ้านเลขที่)', 'Drop-off spot * (e.g. Building 2 / House No.)')}
                       className="w-full h-11 px-3.5 rounded-xl border-2 text-sm focus:outline-none"
                       style={{
                         backgroundColor: 'var(--bg-canvas)',
@@ -673,6 +707,149 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                         color: 'var(--text-main)',
                       }}
                     />
+
+                    {/* ปักหมุดพิกัดส่งอาหารไม่เกิน 3 กม. */}
+                    <div
+                      className="rounded-2xl border-2 p-3 space-y-2"
+                      style={{
+                        backgroundColor: pinOutOfRange
+                          ? '#FFF1F2'
+                          : deliveryPin
+                            ? '#ECFDF5'
+                            : 'var(--bg-canvas)',
+                        borderColor: pinOutOfRange
+                          ? '#FDA4AF'
+                          : deliveryPin
+                            ? '#6EE7B7'
+                            : orderFormError && shopLocation && !deliveryPin
+                              ? '#E11D48'
+                              : 'var(--accent-border)',
+                      }}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-bold flex items-center gap-1.5" style={{ color: 'var(--text-main)' }}>
+                          <MapPin className="w-4 h-4 shrink-0" style={{ color: pinOutOfRange ? '#E11D48' : 'var(--accent-primary)' }} />
+                          {tx(
+                            `ปักหมุดพิกัดส่ง (ไม่เกิน ${MAX_DELIVERY_RADIUS_KM} กม.)`,
+                            `Pin Delivery Location (Max ${MAX_DELIVERY_RADIUS_KM} km)`
+                          )}
+                        </span>
+                        {deliveryPin && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              playSoftClick();
+                              setDeliveryPin(null);
+                              setDeliveryDistanceKm(null);
+                              setOrderFormError('');
+                            }}
+                            className="text-[11px] font-semibold underline cursor-pointer"
+                            style={{ color: 'var(--text-muted)' }}
+                          >
+                            {tx('ล้างหมุด', 'Clear')}
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playSoftClick();
+                            setMapPickerOpen(true);
+                            setOrderFormError('');
+                          }}
+                          className="h-10 px-2.5 rounded-xl text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer transition-transform active:scale-95"
+                          style={{ backgroundColor: 'var(--accent-primary)' }}
+                        >
+                          <MapPin className="w-3.5 h-3.5 shrink-0" />
+                          <span>{deliveryPin ? tx('แก้หมุดบนแผนที่', 'Adjust Pin') : tx('เปิดแผนที่ปักหมุด', 'Open Map Pin')}</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={gpsQuickLoading}
+                          onClick={async () => {
+                            playSoftClick();
+                            setGpsQuickLoading(true);
+                            setOrderFormError('');
+                            try {
+                              const pt = await requestBrowserCurrentLocation();
+                              setDeliveryPin(pt);
+                              const meters = shopLocation ? computeHaversineMeters(shopLocation, pt) : null;
+                              const km = meters !== null ? Number((meters / 1000).toFixed(2)) : null;
+                              setDeliveryDistanceKm(km);
+                              if (meters !== null && meters > MAX_DELIVERY_RADIUS_METERS) {
+                                setOrderFormError(
+                                  tx(
+                                    `ตำแหน่งปัจจุบันของคุณห่างจากร้าน ${formatDistanceKm(meters, 'th')} เกินระยะส่ง ${MAX_DELIVERY_RADIUS_KM} กม. กรุณาเปิดแผนที่เพื่อปรับหมุดนะคะ`,
+                                    `Your current GPS is ${formatDistanceKm(meters, 'en')} away, exceeding the ${MAX_DELIVERY_RADIUS_KM} km limit.`
+                                  )
+                                );
+                              }
+                            } catch {
+                              setMapPickerOpen(true);
+                            } finally {
+                              setGpsQuickLoading(false);
+                            }
+                          }}
+                          className="h-10 px-2.5 rounded-xl border text-xs font-bold flex items-center justify-center gap-1 cursor-pointer disabled:opacity-60 transition-transform active:scale-95"
+                          style={{
+                            backgroundColor: 'var(--bg-card)',
+                            borderColor: '#0284C7',
+                            color: '#0369A1',
+                          }}
+                        >
+                          {gpsQuickLoading ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                          ) : (
+                            <Crosshair className="w-3.5 h-3.5 shrink-0" />
+                          )}
+                          <span>{tx('ใช้ GPS ปัจจุบัน', 'Use My GPS')}</span>
+                        </button>
+                      </div>
+
+                      {deliveryPin ? (
+                        <p
+                          className="text-[11px] font-bold flex items-center gap-1"
+                          style={{ color: pinOutOfRange ? '#BE123C' : '#065F46' }}
+                        >
+                          {pinOutOfRange ? (
+                            <>
+                              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                              {tx(
+                                `เกินระยะ 3 กม. (${formatDistanceKm(pinnedDistanceMeters!, 'th')}) — กรุณาขยับหมุดเข้ามาใกล้ร้านกว่านี้ค่ะ`,
+                                `Out of 3 km range (${formatDistanceKm(pinnedDistanceMeters!, 'en')}) — move pin closer.`
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                              {pinnedDistanceMeters !== null
+                                ? tx(
+                                    `ปักหมุดแล้ว · ห่างจากร้าน ${formatDistanceKm(pinnedDistanceMeters, 'th')} (อยู่ในเขตส่ง ✓)`,
+                                    `Pinned · ${formatDistanceKm(pinnedDistanceMeters, 'en')} from shop (In range ✓)`
+                                  )
+                                : tx(
+                                    `ปักหมุดแล้ว (${deliveryPin.lat.toFixed(4)}, ${deliveryPin.lng.toFixed(4)})`,
+                                    `Pinned (${deliveryPin.lat.toFixed(4)}, ${deliveryPin.lng.toFixed(4)})`
+                                  )}
+                            </>
+                          )}
+                        </p>
+                      ) : (
+                        <p className="text-[11px]" style={{ color: 'var(--text-muted)' }}>
+                          {shopLocation
+                            ? tx(
+                                'กดปักหมุดบนแผนที่หรือใช้ GPS เพื่อเช็กระยะส่งไม่เกิน 3 กม. ค่ะ',
+                                'Drop a pin on the map or use GPS to verify within 3 km.'
+                              )
+                            : tx(
+                                'สามารถปักหมุดบนแผนที่เพื่อให้พ่อหมีเปิดนำทางไปส่งได้ค่ะ',
+                                'Optional: drop a map pin so Papa Bear can navigate to you.'
+                              )}
+                        </p>
+                      )}
+                    </div>
                   </div>
                 )}
 
@@ -730,10 +907,37 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                         dropPointInputRef.current?.focus();
                         return false;
                       }
+                      if (deliveryType === 'ให้พ่อไปส่ง' && shopLocation && !deliveryPin) {
+                        setOrderFormError(
+                          tx(
+                            'กรุณากดปักหมุดพิกัดส่งบนแผนที่ (ไม่เกิน 3 กม.) ก่อนกดสั่งนะคะ',
+                            'Please pin your delivery location on the map (within 3 km) before ordering.'
+                          )
+                        );
+                        setMapPickerOpen(true);
+                        return false;
+                      }
+                      if (deliveryType === 'ให้พ่อไปส่ง' && pinOutOfRange) {
+                        setOrderFormError(
+                          tx(
+                            `พิกัดส่งอยู่ห่างเกิน ${MAX_DELIVERY_RADIUS_KM} กม. ไม่สามารถจัดส่งได้ กรุณาขยับหมุดเข้ามาในเขต 3 กม. ค่ะ`,
+                            `Your pinned spot is beyond ${MAX_DELIVERY_RADIUS_KM} km. Please move the pin inside the 3 km delivery zone.`
+                          )
+                        );
+                        setMapPickerOpen(true);
+                        return false;
+                      }
                     }
                     setOrderFormError('');
                     return true;
                   };
+
+                  const resolvedDistKm =
+                    deliveryType === 'ให้พ่อไปส่ง' && deliveryPin
+                      ? pinnedDistanceMeters !== null
+                        ? Number((pinnedDistanceMeters / 1000).toFixed(2))
+                        : deliveryDistanceKm
+                      : null;
 
                   const handlePayClick = () => {
                     if (!validateOrderForm()) return;
@@ -742,6 +946,13 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                       tableNumber: deliveryType === 'ทานนี้' ? tableNumber.trim() : undefined,
                       customerName,
                       dropPoint,
+                      ...(deliveryType === 'ให้พ่อไปส่ง' && deliveryPin
+                        ? {
+                            deliveryLat: deliveryPin.lat,
+                            deliveryLng: deliveryPin.lng,
+                            deliveryDistanceKm: resolvedDistKm,
+                          }
+                        : {}),
                     });
                   };
 
@@ -754,6 +965,13 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                       tableNumber: deliveryType === 'ทานนี้' ? tableNumber.trim() : undefined,
                       customerName: customerName.trim() || undefined,
                       dropPoint: dropPoint.trim() || undefined,
+                      ...(deliveryType === 'ให้พ่อไปส่ง' && deliveryPin
+                        ? {
+                            deliveryLat: deliveryPin.lat,
+                            deliveryLng: deliveryPin.lng,
+                            deliveryDistanceKm: resolvedDistKm,
+                          }
+                        : {}),
                     },
                     noteLine: tx(
                       '📩 ส่งรายการอาหารจากหน้าเมนูเว็บค่ะ',
@@ -1169,6 +1387,31 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                               {q.customerName} {q.dropPoint && !q.tableNumber ? `(${q.dropPoint})` : ''}
                             </p>
                           )}
+                          {isMerchantView &&
+                            typeof q.deliveryLat === 'number' &&
+                            typeof q.deliveryLng === 'number' && (
+                              <div className="flex flex-wrap items-center gap-1.5 mt-1">
+                                {typeof q.deliveryDistanceKm === 'number' && (
+                                  <span
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg text-[11px] font-bold font-num"
+                                    style={{ backgroundColor: '#ECFDF5', color: '#065F46' }}
+                                  >
+                                    📍 {tx(`ห่าง ${q.deliveryDistanceKm.toFixed(2)} กม.`, `${q.deliveryDistanceKm.toFixed(2)} km`)}
+                                  </span>
+                                )}
+                                <a
+                                  href={buildGoogleMapsPinUrl(q.deliveryLat, q.deliveryLng)}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={() => playSoftClick()}
+                                  className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg text-[11px] font-bold bg-sky-50 border border-sky-200 text-sky-700 hover:underline"
+                                >
+                                  <Navigation className="w-3 h-3" />
+                                  {tx('เปิดแผนที่นำทาง Google Maps', 'Navigate on Google Maps')}
+                                  <ExternalLink className="w-2.5 h-2.5" />
+                                </a>
+                              </div>
+                            )}
                           <p className="text-xs mt-1 line-clamp-2" style={{ color: 'var(--text-muted)' }}>
                             {q.items
                               .map(
@@ -1736,6 +1979,16 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
                         tableNumber: deliveryType === 'ทานนี้' ? tableNumber.trim() : undefined,
                         customerName: customerName.trim() || undefined,
                         dropPoint: dropPoint.trim() || undefined,
+                        ...(deliveryType === 'ให้พ่อไปส่ง' && deliveryPin
+                          ? {
+                              deliveryLat: deliveryPin.lat,
+                              deliveryLng: deliveryPin.lng,
+                              deliveryDistanceKm:
+                                pinnedDistanceMeters !== null
+                                  ? Number((pinnedDistanceMeters / 1000).toFixed(2))
+                                  : deliveryDistanceKm,
+                            }
+                          : {}),
                       },
                     });
                     await copyOrderTextToClipboard(summary);
@@ -1752,6 +2005,19 @@ export const CustomerMenuPOS: React.FC<CustomerMenuPOSProps> = ({
           </div>
         </div>
       )}
+
+      {/* Delivery Pin Picker Map Modal (Max 3 km radius) */}
+      <DeliveryMapPickerModal
+        isOpen={mapPickerOpen}
+        shopLocation={shopLocation}
+        initialPin={deliveryPin}
+        onClose={() => setMapPickerOpen(false)}
+        onConfirmPin={({ point, distanceKm }) => {
+          setDeliveryPin(point);
+          setDeliveryDistanceKm(distanceKm);
+          setOrderFormError('');
+        }}
+      />
     </div>
   );
 };

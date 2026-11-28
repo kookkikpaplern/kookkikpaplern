@@ -177,7 +177,15 @@ async function startServer() {
     }, 350);
   };
 
-  // Restore recent orders/receipts/config from /tmp if server restarted
+  const RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+  const isWithinRetentionWindow = (isoLike?: unknown): boolean => {
+    if (!isoLike) return true;
+    const ms = new Date(String(isoLike)).getTime();
+    if (!Number.isFinite(ms)) return true;
+    return Date.now() - ms < RETENTION_MS;
+  };
+
+  // Restore recent orders/receipts/config from /tmp if server restarted (pruning > 7 days old)
   try {
     if (fs.existsSync(SYNC_PERSIST_PATH)) {
       const raw = fs.readFileSync(SYNC_PERSIST_PATH, 'utf8');
@@ -193,12 +201,12 @@ async function startServer() {
         const ordersMap = new Map<string, Record<string, unknown>>();
         for (const o of saved.orders || []) {
           const id = String(o.orderId || '').trim();
-          if (id) ordersMap.set(id, o);
+          if (id && isWithinRetentionWindow(o.createdAt)) ordersMap.set(id, o);
         }
         const receiptsMap = new Map<string, Record<string, unknown>>();
         for (const r of saved.receipts || []) {
           const bid = String(r.billId || '').trim().toUpperCase();
-          if (bid) receiptsMap.set(bid, r);
+          if (bid && isWithinRetentionWindow(r.issuedAt)) receiptsMap.set(bid, r);
         }
         syncRooms.set(sanitizeRoomId(roomId), {
           clients: new Map(),
@@ -400,6 +408,18 @@ async function startServer() {
     res.json({
       roomId,
       peers: getRoomPeersPayload(roomId),
+    });
+  });
+
+  app.get('/api/maps-config', (_req, res) => {
+    const apiKey = (
+      process.env.VITE_GOOGLE_MAPS_API_KEY ||
+      process.env.GOOGLE_MAPS_API_KEY ||
+      ''
+    ).trim();
+    res.json({
+      configured: Boolean(apiKey),
+      apiKey,
     });
   });
 
@@ -1123,6 +1143,91 @@ Respond strictly as JSON following the schema.`,
     ws.on('close', cleanupPeer);
     ws.on('error', cleanupPeer);
   });
+
+  const runWeeklyRetentionCleanup = async () => {
+    // 1) Prune in-memory syncRooms entries older than 7 days
+    let prunedSync = false;
+    for (const room of syncRooms.values()) {
+      for (const [oid, o] of room.orders.entries()) {
+        if (!isWithinRetentionWindow(o.createdAt)) {
+          room.orders.delete(oid);
+          prunedSync = true;
+        }
+      }
+      for (const [bid, r] of room.receipts.entries()) {
+        if (!isWithinRetentionWindow(r.issuedAt)) {
+          room.receipts.delete(bid);
+          prunedSync = true;
+        }
+      }
+    }
+    if (prunedSync) schedulePersistRooms();
+
+    // 2) Auto-delete Supabase orders + slip images older than 7 days
+    const sbUrl = (process.env.VITE_SUPABASE_URL || 'https://kadhcobomdqiobrnntlv.supabase.co').trim();
+    const sbKey = (
+      process.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
+      'sb_publishable_WvGv3CDfPK9dyoLJCu5Srw__iO18OXv'
+    ).trim();
+    const headers = {
+      apikey: sbKey,
+      Authorization: `Bearer ${sbKey}`,
+      'Content-Type': 'application/json',
+    };
+    const cutoffIso = new Date(Date.now() - RETENTION_MS).toISOString();
+
+    try {
+      const selRes = await fetch(
+        `${sbUrl}/rest/v1/orders?select=id,slip_url&created_at=lt.${encodeURIComponent(cutoffIso)}&limit=200`,
+        { headers, signal: AbortSignal.timeout(8000) }
+      );
+      if (!selRes.ok) return;
+      const expiredRows = (await selRes.json().catch(() => [])) as Array<{
+        id: string | number;
+        slip_url?: string | null;
+      }>;
+      if (!Array.isArray(expiredRows) || expiredRows.length === 0) return;
+
+      const prefixes = Array.from(
+        new Set(
+          expiredRows
+            .map((r) => {
+              if (!r.slip_url || typeof r.slip_url !== 'string') return null;
+              const marker = '/storage/v1/object/public/slips/';
+              const idx = r.slip_url.indexOf(marker);
+              if (idx < 0) return null;
+              return decodeURIComponent(r.slip_url.slice(idx + marker.length)).replace(/^\/+/, '');
+            })
+            .filter((p): p is string => Boolean(p))
+        )
+      );
+
+      if (prefixes.length > 0) {
+        await fetch(`${sbUrl}/storage/v1/object/slips`, {
+          method: 'DELETE',
+          headers,
+          body: JSON.stringify({ prefixes }),
+          signal: AbortSignal.timeout(8000),
+        }).catch(() => {});
+      }
+
+      const idFilter = expiredRows.map((r) => String(r.id)).join(',');
+      await fetch(`${sbUrl}/rest/v1/orders?id=in.(${idFilter})`, {
+        method: 'DELETE',
+        headers,
+        signal: AbortSignal.timeout(8000),
+      }).catch(() => {});
+    } catch {
+      // Non-fatal background cleanup error
+    }
+  };
+
+  setTimeout(() => {
+    void runWeeklyRetentionCleanup();
+  }, 15000);
+  setInterval(() => {
+    void runWeeklyRetentionCleanup();
+  }, 6 * 60 * 60 * 1000);
 
   httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);

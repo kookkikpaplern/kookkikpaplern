@@ -32,6 +32,9 @@ export interface CustomerQueueOrder {
   paymentMethod?: 'เงินสด' | 'สแกน QR';
   customerName?: string;
   dropPoint?: string;
+  deliveryLat?: number;
+  deliveryLng?: number;
+  deliveryDistanceKm?: number;
   slipImageUrl?: string;
   slip_url?: string;
   supabaseOrderId?: string | number;
@@ -39,6 +42,7 @@ export interface CustomerQueueOrder {
   slipDetectedAmount?: number;
   slipTransactionRef?: string;
   slipVerifyNote?: string;
+  isTestMode?: boolean;
   accepted?: boolean;
   createdAt: string;
   status: 'กำลังทำ' | 'เสร็จแล้ว';
@@ -443,6 +447,20 @@ function mapOnlineOrderRows(rawRows: Array<Record<string, unknown>>): CustomerQu
         paymentMethod,
         customerName: String(row.customerName || '').trim() || undefined,
         dropPoint: dropPointRaw || undefined,
+        deliveryLat:
+          row.deliveryLat !== undefined && row.deliveryLat !== '' && Number.isFinite(Number(row.deliveryLat))
+            ? Number(row.deliveryLat)
+            : undefined,
+        deliveryLng:
+          row.deliveryLng !== undefined && row.deliveryLng !== '' && Number.isFinite(Number(row.deliveryLng))
+            ? Number(row.deliveryLng)
+            : undefined,
+        deliveryDistanceKm:
+          row.deliveryDistanceKm !== undefined &&
+          row.deliveryDistanceKm !== '' &&
+          Number.isFinite(Number(row.deliveryDistanceKm))
+            ? Number(row.deliveryDistanceKm)
+            : undefined,
         slipImageUrl: slipRaw || undefined,
         slipVerifyStatus,
         slipDetectedAmount:
@@ -648,6 +666,82 @@ export async function recordSilentVoid(
   });
 }
 
+const LOCAL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
+function parseEntryTimestampMs(entry: { id?: string; dateKey?: string; issuedAt?: string }): number | null {
+  if (entry.issuedAt) {
+    const t = new Date(entry.issuedAt).getTime();
+    if (Number.isFinite(t)) return t;
+  }
+  if (entry.id) {
+    const m = entry.id.match(/^(?:B|void_)(\d{10,})/);
+    if (m) {
+      const n = Number(m[1]);
+      if (Number.isFinite(n)) return n;
+    }
+  }
+  if (entry.dateKey && /^\d{4}-\d{2}-\d{2}$/.test(entry.dateKey)) {
+    const t = new Date(`${entry.dateKey}T23:59:59`).getTime();
+    if (Number.isFinite(t)) return t;
+  }
+  return null;
+}
+
+export function pruneExpiredLocalSalesData(retentionDays = 7): {
+  removedLogs: number;
+  removedReceipts: number;
+  removedVoids: number;
+} {
+  const cutoff = Date.now() - Math.max(1, retentionDays) * 24 * 60 * 60 * 1000;
+  let removedLogs = 0;
+  let removedReceipts = 0;
+  let removedVoids = 0;
+
+  try {
+    const logs = getSaleHistoryLogs();
+    const keptLogs = logs.filter((item) => {
+      const ts = parseEntryTimestampMs(item);
+      return ts === null || ts >= cutoff;
+    });
+    removedLogs = logs.length - keptLogs.length;
+    if (removedLogs > 0) {
+      localStorage.setItem(STORAGE_KEYS.SALE_LOGS, JSON.stringify(keptLogs.slice(0, 500)));
+    }
+  } catch {
+    // Ignore storage error
+  }
+
+  try {
+    const receipts = getReceiptSlipsCache();
+    const keptReceipts = receipts.filter((r) => {
+      const ts = parseEntryTimestampMs(r);
+      return ts === null || ts >= cutoff;
+    });
+    removedReceipts = receipts.length - keptReceipts.length;
+    if (removedReceipts > 0) {
+      localStorage.setItem(STORAGE_KEYS.RECEIPT_SLIPS, JSON.stringify(keptReceipts.slice(0, 300)));
+    }
+  } catch {
+    // Ignore storage error
+  }
+
+  try {
+    const voids = getSilentVoidLogs();
+    const keptVoids = voids.filter((v) => {
+      const ts = parseEntryTimestampMs(v);
+      return ts === null || ts >= cutoff;
+    });
+    removedVoids = voids.length - keptVoids.length;
+    if (removedVoids > 0) {
+      localStorage.setItem(STORAGE_KEYS.VOID_LOGS, JSON.stringify(keptVoids.slice(0, 100)));
+    }
+  } catch {
+    // Ignore storage error
+  }
+
+  return { removedLogs, removedReceipts, removedVoids };
+}
+
 export function getSaleHistoryLogs(): SaleHistoryEntry[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEYS.SALE_LOGS);
@@ -658,7 +752,11 @@ export function getSaleHistoryLogs(): SaleHistoryEntry[] {
 }
 
 export function saveSaleHistoryLog(entry: SaleHistoryEntry): void {
-  const existing = getSaleHistoryLogs();
+  const cutoff = Date.now() - LOCAL_RETENTION_MS;
+  const existing = getSaleHistoryLogs().filter((item) => {
+    const ts = parseEntryTimestampMs(item);
+    return ts === null || ts >= cutoff;
+  });
   existing.unshift({
     ...entry,
     dateKey: entry.dateKey || getTodayDateKey(),
@@ -677,7 +775,12 @@ export function getReceiptSlipsCache(): ReceiptSlipRecord[] {
 
 export function saveReceiptSlipsCache(receipts: ReceiptSlipRecord[]): void {
   try {
-    localStorage.setItem(STORAGE_KEYS.RECEIPT_SLIPS, JSON.stringify(receipts.slice(0, 300)));
+    const cutoff = Date.now() - LOCAL_RETENTION_MS;
+    const fresh = receipts.filter((r) => {
+      const ts = parseEntryTimestampMs(r);
+      return ts === null || ts >= cutoff;
+    });
+    localStorage.setItem(STORAGE_KEYS.RECEIPT_SLIPS, JSON.stringify(fresh.slice(0, 300)));
   } catch {
     // Ignore storage quota errors
   }

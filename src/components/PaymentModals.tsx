@@ -294,6 +294,7 @@ interface QrPaymentModalProps {
   mascotMode?: 'kids' | 'krua';
   outfits?: BearFamilyOutfits;
   allowSlipUpload?: boolean;
+  isTestMode?: boolean;
   lineShopUrl?: string;
   lineQrImageUrl?: string;
   deliveryInfo?: LineDeliveryInfo;
@@ -321,6 +322,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
   mascotMode = 'kids',
   outfits,
   allowSlipUpload = false,
+  isTestMode = false,
   lineShopUrl = '',
   lineQrImageUrl = '',
   deliveryInfo,
@@ -520,6 +522,22 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
         : {};
 
       if (data.status === 'rejected') {
+        if (isTestMode) {
+          if (uploadedPublicUrl) {
+            setSlipPublicUrl(uploadedPublicUrl);
+          }
+          setSlipImageUrl(compressed);
+          setSlipVerifyMeta({
+            verifyStatus: 'unverified',
+            slipPublicUrl: uploadedPublicUrl || undefined,
+            verifyNote: tx(
+              '🟠 โหมดทดสอบ: แนบรูปจำลองเพื่อทดสอบระบบแล้ว (ไม่ใช่สลิปโอนจริง)',
+              '🟠 Test Mode: Dummy image attached for testing (not a real slip)'
+            ),
+          });
+          playSoftClick();
+          return;
+        }
         playScanError();
         setSlipImageUrl('');
         setSlipPublicUrl('');
@@ -1009,7 +1027,19 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
             )}
 
             {/* Payment Check Status */}
-            {allowSlipUpload && !slipImageUrl && !lineBackupConfirmed && (
+            {allowSlipUpload && isTestMode && !slipImageUrl && (
+              <p
+                className="text-xs sm:text-sm font-bold px-4 py-2.5 rounded-2xl w-full border"
+                style={{ backgroundColor: '#FFEDD5', borderColor: '#FDBA74', color: '#9A3412' }}
+              >
+                {tx(
+                  '🟠 โหมดทดสอบ: กดปุ่ม "ทดสอบส่งออเดอร์" ด้านล่างได้เลยโดยไม่ต้องโอนเงินจริง (หรือลองแนบรูปใดๆ เพื่อทดสอบระบบสลิป)',
+                  '🟠 Test Mode: Tap below to submit a test order without real transfer (or attach any photo to test slip upload)'
+                )}
+              </p>
+            )}
+
+            {allowSlipUpload && !isTestMode && !slipImageUrl && !lineBackupConfirmed && (
               <p
                 className="text-xs sm:text-sm font-bold px-4 py-2.5 rounded-2xl w-full"
                 style={{ backgroundColor: '#FFE4E6', color: '#BE123C' }}
@@ -1124,7 +1154,7 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                   isCompressingSlip ||
                   isVerifyingSlip ||
                   isSubmittingOrder ||
-                  (allowSlipUpload && !slipImageUrl && !lineBackupConfirmed)
+                  (allowSlipUpload && !isTestMode && !slipImageUrl && !lineBackupConfirmed)
                 }
                 onClick={async () => {
                   if (isSubmittingOrder) return;
@@ -1134,13 +1164,21 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                           ...(slipVerifyMeta || { verifyStatus: 'unverified' }),
                           slipPublicUrl: slipPublicUrl || slipVerifyMeta?.slipPublicUrl,
                         }
-                      : {
-                          verifyStatus: 'manual_line',
-                          verifyNote: tx(
-                            'ลูกค้าเลือกส่งสลิปทาง LINE สำรอง · รอร้านตรวจยอดเข้าบัญชีก่อนรับออเดอร์',
-                            'Customer opted for LINE backup slip · Waiting for manual shop verification'
-                          ),
-                        }
+                      : isTestMode && !lineBackupConfirmed
+                        ? {
+                            verifyStatus: 'unverified',
+                            verifyNote: tx(
+                              '🟠 ออเดอร์จำลอง (โหมดทดสอบ · ไม่ได้โอนเงินจริง)',
+                              '🟠 Simulated test order (Test Mode · No real transfer)'
+                            ),
+                          }
+                        : {
+                            verifyStatus: 'manual_line',
+                            verifyNote: tx(
+                              'ลูกค้าเลือกส่งสลิปทาง LINE สำรอง · รอร้านตรวจยอดเข้าบัญชีก่อนรับออเดอร์',
+                              'Customer opted for LINE backup slip · Waiting for manual shop verification'
+                            ),
+                          }
                     : slipImageUrl
                       ? {
                           ...(slipVerifyMeta || { verifyStatus: 'unverified' }),
@@ -1155,7 +1193,13 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                   }
                 }}
                 className="col-span-2 h-14 rounded-2xl font-bold text-base sm:text-lg text-white cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed transition-transform active:scale-95 flex items-center justify-center gap-2"
-                style={{ backgroundColor: allowSlipUpload ? '#0369A1' : '#16A34A' }}
+                style={{
+                  backgroundColor: allowSlipUpload
+                    ? isTestMode && !slipImageUrl && !lineBackupConfirmed
+                      ? '#EA580C'
+                      : '#0369A1'
+                    : '#16A34A',
+                }}
               >
                 {isSubmittingOrder && <Loader2 className="w-5 h-5 animate-spin" />}
                 {isSubmittingOrder
@@ -1163,7 +1207,9 @@ export const QrPaymentModal: React.FC<QrPaymentModalProps> = ({
                   : allowSlipUpload
                     ? slipImageUrl
                       ? tx('ส่งออเดอร์ & สลิปให้ร้านตรวจสอบ ✓', 'Send Order & Slip for Verification ✓')
-                      : tx('ส่งออเดอร์ (รอตรวจสลิปทาง LINE) ✓', 'Send Order (LINE Slip Check) ✓')
+                      : isTestMode && !lineBackupConfirmed
+                        ? tx('🧪 ทดสอบส่งออเดอร์ (โหมดทดสอบ) ✓', '🧪 Submit Test Order ✓')
+                        : tx('ส่งออเดอร์ (รอตรวจสลิปทาง LINE) ✓', 'Send Order (LINE Slip Check) ✓')
                     : tx('โอนเรียบร้อยแล้ว ✓', 'Payment Confirmed ✓')}
               </button>
             </div>

@@ -129,6 +129,9 @@ const STAFF_NAME_EN: Record<string, string> = {
   กิ๊ก: 'Kik',
   พี่สาว: 'Big Sister',
   พนักงานขายแทน: 'Substitute Staff',
+  'พนักงาน 1': 'Staff 1',
+  'พนักงาน 2': 'Staff 2',
+  'พนักงาน 3': 'Staff 3',
   ลูกค้าสั่งเอง: 'Self-Order Guest',
 };
 

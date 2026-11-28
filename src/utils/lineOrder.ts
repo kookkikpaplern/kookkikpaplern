@@ -6,6 +6,9 @@ export interface LineDeliveryInfo {
   tableNumber?: string;
   customerName?: string;
   dropPoint?: string;
+  deliveryLat?: number;
+  deliveryLng?: number;
+  deliveryDistanceKm?: number | null;
 }
 
 export interface BuildLineOrderParams {
@@ -42,6 +45,18 @@ export function buildLineOrderText({
       }
       if (deliveryInfo.dropPoint?.trim()) {
         lines.push(`📍 จุดส่ง: ${deliveryInfo.dropPoint.trim()}`);
+      }
+      if (
+        typeof deliveryInfo.deliveryLat === 'number' &&
+        typeof deliveryInfo.deliveryLng === 'number'
+      ) {
+        const distText =
+          typeof deliveryInfo.deliveryDistanceKm === 'number'
+            ? ` (ห่างจากร้าน ${deliveryInfo.deliveryDistanceKm.toFixed(2)} กม.)`
+            : '';
+        lines.push(
+          `🗺️ พิกัดแผนที่${distText}: https://www.google.com/maps/search/?api=1&query=${deliveryInfo.deliveryLat.toFixed(6)},${deliveryInfo.deliveryLng.toFixed(6)}`
+        );
       }
     } else {
       lines.push(`🛍️ รูปแบบ: ${deliveryInfo.deliveryType}`);

@@ -71,6 +71,7 @@ import {
   loadDailyTestMode,
   markSaleHistoryExited,
   postToSheets,
+  pruneExpiredLocalSalesData,
   ReceiptSlipRecord,
   recordSilentVoid,
   saveCachedFaqs,
@@ -90,14 +91,21 @@ import {
 } from './utils/sound';
 import { SharedShopConfigPayload, useRealtimeShopSync } from './utils/realtimeSync';
 import {
+  cleanupExpiredOrdersInSupabase,
   fetchOrdersFromSupabase,
   insertOrderToSupabase,
   isSafeHttpUrl,
   mapSupabaseOrderToQueueOrder,
+  SALES_RETENTION_DAYS,
   SupabaseOrderItem,
   updateOrderStatusInSupabase,
   uploadSlipToSupabase,
 } from './utils/supabaseClient';
+import {
+  buildGoogleMapsPinUrl,
+  parseShopLocationJson,
+  ShopLocationConfig,
+} from './utils/geoDistance';
 
 const KEYS = {
   CONFIG_VER: 'kkp_config_version',
@@ -130,6 +138,7 @@ const KEYS = {
   TOOLBAR_ORDER: 'kkp_toolbar_order',
   HIDDEN_TOOLBAR: 'kkp_hidden_toolbar_ids_v1',
   CASHIER_ALLOWED_TOOLBAR: 'kkp_cashier_allowed_toolbar_ids_v1',
+  SHOP_LOCATION: 'kkp_shop_location_v1',
 };
 
 const CURRENT_CONFIG_VERSION = '2027_kkp_clean_v3';
@@ -207,9 +216,10 @@ export default function App() {
   const [orgCode, setOrgCode] = useState<string>(
     () => localStorage.getItem(KEYS.ORG_CODE) || SHOP_CONFIG.orgCode
   );
-  const [staffUsers, setStaffUsers] = useState<Record<string, StaffUser>>(
-    () => loadCachedStaffUsers() || SHOP_CONFIG.staffUsers
-  );
+  const [staffUsers, setStaffUsers] = useState<Record<string, StaffUser>>(() => ({
+    ...SHOP_CONFIG.staffUsers,
+    ...(loadCachedStaffUsers() || {}),
+  }));
   const [currentUser, setCurrentUser] = useState<StaffUser | null>(null);
 
   // Settings & Theme State (seeded from SHOP_CONFIG + localStorage + Sheets sync)
@@ -442,6 +452,10 @@ export default function App() {
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [supabaseOrdersVersion, setSupabaseOrdersVersion] = useState(0);
   const [scanToast, setScanToast] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
+  const [shopLocation, setShopLocation] = useState<ShopLocationConfig | null>(() =>
+    parseShopLocationJson(localStorage.getItem(KEYS.SHOP_LOCATION))
+  );
+  const [gmpQuotaExceeded, setGmpQuotaExceeded] = useState(false);
 
   // Customizable Top Toolbar Order, Hidden Buttons & Staff Allowance State
   const [toolbarOrder, setToolbarOrder] = useState<ToolbarItemId[]>(() => {
@@ -495,6 +509,9 @@ export default function App() {
       tableNumber?: string;
       customerName: string;
       dropPoint: string;
+      deliveryLat?: number;
+      deliveryLng?: number;
+      deliveryDistanceKm?: number | null;
     };
     receipt?: ReceiptSlipRecord | null;
     pendingOrderId?: string | null;
@@ -513,6 +530,15 @@ export default function App() {
     document.documentElement.setAttribute('data-theme', themeId);
     localStorage.setItem(KEYS.THEME, themeId);
   }, [themeId]);
+
+  // Listen for Google Maps Platform quota-exceeded events across all views
+  useEffect(() => {
+    const handleQuotaExceeded = () => {
+      setGmpQuotaExceeded(true);
+    };
+    window.addEventListener('gmp-quota-exceeded', handleQuotaExceeded);
+    return () => window.removeEventListener('gmp-quota-exceeded', handleQuotaExceeded);
+  }, []);
 
   // Persist Queue & Receipts
   useEffect(() => {
@@ -700,6 +726,11 @@ export default function App() {
       setEnableAutoPaymentCheck(val);
       localStorage.setItem(KEYS.AUTO_CHECK, String(val));
     }
+    if (s.isTestMode !== undefined) {
+      const val = s.isTestMode.toLowerCase() === 'true';
+      setIsTestMode(val);
+      saveDailyTestMode(val);
+    }
     if (s.hiddenToolbarIdsJson) {
       try {
         const parsed = JSON.parse(s.hiddenToolbarIdsJson) as ToolbarItemId[];
@@ -722,6 +753,18 @@ export default function App() {
         }
       } catch {
         // Ignore malformed cashierAllowedToolbarIdsJson
+      }
+    }
+    if (s.shopLocationJson !== undefined) {
+      if (!s.shopLocationJson.trim()) {
+        setShopLocation(null);
+        localStorage.removeItem(KEYS.SHOP_LOCATION);
+      } else {
+        const parsedLoc = parseShopLocationJson(s.shopLocationJson);
+        if (parsedLoc) {
+          setShopLocation(parsedLoc);
+          localStorage.setItem(KEYS.SHOP_LOCATION, JSON.stringify(parsedLoc));
+        }
       }
     }
   }, []);
@@ -751,8 +794,10 @@ export default function App() {
       receiptSlipEnabled: String(receiptSlipEnabled),
       exitScannerEnabled: String(exitScannerEnabled),
       enableAutoPaymentCheck: String(enableAutoPaymentCheck),
+      isTestMode: String(isTestMode),
       hiddenToolbarIdsJson: JSON.stringify(hiddenToolbarIds),
       cashierAllowedToolbarIdsJson: JSON.stringify(cashierAllowedToolbarIds),
+      shopLocationJson: shopLocation ? JSON.stringify(shopLocation) : '',
       ...(overrides || {}),
     }),
     [
@@ -777,10 +822,29 @@ export default function App() {
       receiptSlipEnabled,
       exitScannerEnabled,
       enableAutoPaymentCheck,
+      isTestMode,
       hiddenToolbarIds,
       cashierAllowedToolbarIds,
+      shopLocation,
     ]
   );
+
+  const handleChangeShopLocation = useCallback((next: ShopLocationConfig | null) => {
+    setShopLocation(next);
+    try {
+      if (next) {
+        localStorage.setItem(KEYS.SHOP_LOCATION, JSON.stringify(next));
+      } else {
+        localStorage.removeItem(KEYS.SHOP_LOCATION);
+      }
+    } catch {
+      // Ignore storage quota errors
+    }
+    pushConfigSnapshotRef.current(
+      { shopLocationJson: next ? JSON.stringify(next) : '' },
+      true
+    );
+  }, []);
 
   useEffect(() => {
     pushConfigSnapshotRef.current = (overrides?: Record<string, string>, immediate?: boolean) => {
@@ -1044,8 +1108,9 @@ export default function App() {
     }
 
     if (synced.staffUsers && Object.keys(synced.staffUsers).length > 0) {
-      setStaffUsers(synced.staffUsers);
-      parts.push(tx(`ผู้ใช้งาน ${Object.keys(synced.staffUsers).length} คน`, `${Object.keys(synced.staffUsers).length} users`));
+      const mergedStaff = { ...SHOP_CONFIG.staffUsers, ...synced.staffUsers };
+      setStaffUsers(mergedStaff);
+      parts.push(tx(`ผู้ใช้งาน ${Object.keys(mergedStaff).length} คน`, `${Object.keys(mergedStaff).length} users`));
     }
 
     if (synced.faqs && synced.faqs.length > 0) {
@@ -1095,6 +1160,24 @@ export default function App() {
   );
 
   useEffect(() => {
+    // 1) Auto-prune local sales/receipts/voids and completed queue orders older than 7 days
+    pruneExpiredLocalSalesData(SALES_RETENTION_DAYS);
+    const cutoffMs = Date.now() - SALES_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+    setQueueOrders((prev) =>
+      prev.filter((q) => {
+        if (q.status !== 'เสร็จแล้ว') return true;
+        const ts = q.createdAt ? new Date(q.createdAt).getTime() : NaN;
+        return !Number.isFinite(ts) || ts >= cutoffMs;
+      })
+    );
+
+    // 2) Auto-cleanup Supabase orders & slip images older than 7 days (runs with 6h cooldown)
+    void cleanupExpiredOrdersInSupabase(SALES_RETENTION_DAYS, false).then((summary) => {
+      if (summary.deletedOrders > 0) {
+        setSupabaseOrdersVersion((v) => v + 1);
+      }
+    });
+
     refreshOnlineOrdersNow(false);
     if (scriptUrl) {
       syncAllBackendNow();
@@ -1369,18 +1452,31 @@ export default function App() {
       const cleanCustomerName = checkoutState.deliveryInfo?.customerName?.trim() || '';
       const cleanDropPoint = checkoutState.deliveryInfo?.dropPoint?.trim() || '';
       const chosenType = checkoutState.deliveryInfo?.deliveryType;
+      const deliveryLat = checkoutState.deliveryInfo?.deliveryLat;
+      const deliveryLng = checkoutState.deliveryInfo?.deliveryLng;
+      const deliveryDistanceKm =
+        typeof checkoutState.deliveryInfo?.deliveryDistanceKm === 'number' &&
+        Number.isFinite(checkoutState.deliveryInfo.deliveryDistanceKm)
+          ? checkoutState.deliveryInfo.deliveryDistanceKm
+          : undefined;
+      const hasDeliveryPin =
+        typeof deliveryLat === 'number' &&
+        Number.isFinite(deliveryLat) &&
+        typeof deliveryLng === 'number' &&
+        Number.isFinite(deliveryLng);
+      const pinMetaText = hasDeliveryPin
+        ? `${deliveryDistanceKm !== undefined ? ` ห่าง ${deliveryDistanceKm.toFixed(2)} กม.` : ''} [แผนที่: ${buildGoogleMapsPinUrl(deliveryLat!, deliveryLng!)}]`
+        : '';
 
       const baseDeliveryStr = chosenType
         ? chosenType === 'ทานนี้'
           ? `ทานนี้${cleanTable ? ` (โต๊ะที่ ${cleanTable})` : ''}${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}`
           : chosenType === 'กลับบ้าน'
             ? `กลับบ้าน${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}`
-            : `${chosenType}${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}${cleanDropPoint ? ` (${cleanDropPoint})` : ''}`
+            : `${chosenType}${cleanCustomerName ? ` - ${cleanCustomerName}` : ''}${cleanDropPoint ? ` (${cleanDropPoint})` : ''}${deliveryDistanceKm !== undefined ? ` [ห่าง ${deliveryDistanceKm.toFixed(2)} กม.]` : ''}`
         : 'หน้าร้าน';
 
-      const deliveryWithBank = cleanBank
-        ? `${baseDeliveryStr} [เข้า: ${cleanBank}]`
-        : baseDeliveryStr;
+      const deliveryWithBank = `${baseDeliveryStr}${pinMetaText}${cleanBank ? ` [เข้า: ${cleanBank}]` : ''}`;
 
       const issuedTimestamp = new Date().toLocaleString('th-TH');
       const issuedIso = new Date().toISOString();
@@ -1431,6 +1527,8 @@ export default function App() {
           paymentMethod: checkoutState.method,
           customerName: cleanCustomerName || undefined,
           dropPoint: resolvedDropPoint,
+          ...(hasDeliveryPin ? { deliveryLat, deliveryLng } : {}),
+          ...(deliveryDistanceKm !== undefined ? { deliveryDistanceKm } : {}),
           slipImageUrl: preUploadedSlipUrl || cleanSlip,
           slip_url: preUploadedSlipUrl || undefined,
           slipVerifyStatus: slipMeta?.verifyStatus,
@@ -1592,6 +1690,20 @@ export default function App() {
             payment_method: supabasePaymentMethod,
             slip_url: resolvedSlipUrl,
             status: 'pending',
+            meta: {
+              billId,
+              ...(createdOrderObj ? { queueNo: createdOrderObj.queueNo } : {}),
+              shopName: activeShopName,
+              staffName: actorUser.name,
+              deliveryType: chosenType || (isKrua ? 'ทานนี้' : 'รับเองที่ร้าน'),
+              ...(cleanTable ? { tableNumber: cleanTable } : {}),
+              ...(cleanCustomerName ? { customerName: cleanCustomerName } : {}),
+              ...(cleanDropPoint ? { dropPoint: cleanDropPoint } : {}),
+              ...(hasDeliveryPin ? { deliveryLat, deliveryLng } : {}),
+              ...(deliveryDistanceKm !== undefined ? { deliveryDistanceKm } : {}),
+              ...(cleanBank ? { bankAccount: cleanBank } : {}),
+              isTestMode,
+            },
           });
 
           if (savedSupabaseOrder) {
@@ -1746,10 +1858,28 @@ export default function App() {
     [queueOrders, scriptUrl, orgCode]
   );
 
+  const gmpQuotaBanner = gmpQuotaExceeded ? (
+    <div className="bg-amber-50 border-b border-amber-200 text-amber-900 px-4 py-2.5 text-xs md:text-sm text-center sticky top-0 z-50 shadow-sm">
+      <span>
+        Google Maps Platform quota reached. If you are the app owner, visit{' '}
+        <a
+          href="https://developers.google.com/maps/ai/ai-studio?utm_campaign=gmp_mcp_codeassist_v1_aistudio#quota_exceeded_errors"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline font-semibold text-amber-950 hover:text-amber-800"
+        >
+          maps developer site
+        </a>{' '}
+        for instructions to update your account.
+      </span>
+    </div>
+  ) : null;
+
   // 1. WELCOME LANDING SCREEN (หน้าแรกต้อนรับลูกค้า + ป้ายโฆษณา + ถาม-ตอบด่วน)
   if (viewScreen === 'welcome') {
     return (
       <>
+        {gmpQuotaBanner}
         <WelcomeLanding
           shopNameTh={shopNameTh}
           shopNameEn={shopNameEn}
@@ -1796,27 +1926,30 @@ export default function App() {
   // 2. STAFF 2-LAYER AUTH GATE
   if (viewScreen === 'staff-auth' || (viewScreen === 'staff-pos' && !currentUser)) {
     return (
-      <AuthGate
-        orgCodeExpected={orgCode}
-        staffUsers={staffUsers}
-        shopNameTh={shopNameTh}
-        shopNameEn={shopNameEn}
-        isOrgVerified={isOrgVerified}
-        outfits={bearOutfits}
-        onOrgVerified={() => {
-          localStorage.setItem(KEYS.ORG_VERIFIED, 'true');
-          setIsOrgVerified(true);
-        }}
-        onResetOrgCode={() => {
-          localStorage.removeItem(KEYS.ORG_VERIFIED);
-          setIsOrgVerified(false);
-        }}
-        onBackToWelcome={() => setViewScreen('welcome')}
-        onAuthenticated={(_pin, user) => {
-          setCurrentUser(user);
-          setViewScreen('staff-pos');
-        }}
-      />
+      <>
+        {gmpQuotaBanner}
+        <AuthGate
+          orgCodeExpected={orgCode}
+          staffUsers={staffUsers}
+          shopNameTh={shopNameTh}
+          shopNameEn={shopNameEn}
+          isOrgVerified={isOrgVerified}
+          outfits={bearOutfits}
+          onOrgVerified={() => {
+            localStorage.setItem(KEYS.ORG_VERIFIED, 'true');
+            setIsOrgVerified(true);
+          }}
+          onResetOrgCode={() => {
+            localStorage.removeItem(KEYS.ORG_VERIFIED);
+            setIsOrgVerified(false);
+          }}
+          onBackToWelcome={() => setViewScreen('welcome')}
+          onAuthenticated={(_pin, user) => {
+            setCurrentUser(user);
+            setViewScreen('staff-pos');
+          }}
+        />
+      </>
     );
   }
 
@@ -1825,6 +1958,7 @@ export default function App() {
     const guestUser: StaffUser = { name: 'ลูกค้าสั่งเอง', role: 'cashier' };
     return (
       <div className="min-h-screen pb-14" style={{ backgroundColor: 'var(--bg-canvas)', color: 'var(--text-main)' }}>
+        {gmpQuotaBanner}
         <header
           className="sticky top-0 z-30 border-b backdrop-blur-md"
           style={{
@@ -1895,6 +2029,20 @@ export default function App() {
           </div>
         )}
 
+        {isTestMode && (
+          <div className="bg-orange-600 text-white px-4 py-2.5 shadow-sm">
+            <div className="max-w-7xl mx-auto flex items-center justify-center gap-2 text-xs sm:text-sm font-bold text-center">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              <span>
+                {tx(
+                  '🟠 โหมดทดสอบระบบ: สามารถกดสั่งและส่งออเดอร์จำลองได้ทันทีโดยไม่ต้องโอนเงินจริงค่ะ',
+                  '🟠 Test Mode Active: You can submit test orders freely without real payment'
+                )}
+              </span>
+            </div>
+          </div>
+        )}
+
         <main className="max-w-7xl mx-auto px-4 sm:px-6 pt-6">
           <CustomerMenuPOS
             menuItems={menuItems}
@@ -1907,6 +2055,7 @@ export default function App() {
             foodShopNameEn={foodShopNameEn}
             lineShopUrl={lineShopUrl}
             lineQrImageUrl={lineQrImageUrl}
+            shopLocation={shopLocation}
             isMerchantView={false}
             initialTableNumber={initialCustomerTable}
             onAddMenuItem={(item, options) => {
@@ -1981,6 +2130,7 @@ export default function App() {
           mascotMode="krua"
           outfits={bearOutfits}
           allowSlipUpload={true}
+          isTestMode={isTestMode}
           lineShopUrl={lineShopUrl}
           lineQrImageUrl={lineQrImageUrl}
           deliveryInfo={checkoutState.deliveryInfo}
@@ -2047,6 +2197,7 @@ export default function App() {
       className="min-h-screen pb-20"
       style={{ backgroundColor: 'var(--bg-canvas)', color: 'var(--text-main)' }}
     >
+      {gmpQuotaBanner}
       {/* Prominent Full-Width Test Mode Warning Banner */}
       {isTestMode && (
         <div className="bg-orange-600 text-white px-4 py-3 shadow-md">
@@ -2067,6 +2218,7 @@ export default function App() {
                   playSoftClick();
                   setIsTestMode(false);
                   saveDailyTestMode(false);
+                  pushConfigSnapshotRef.current({ isTestMode: 'false' }, true);
                 }}
                 className="px-4 py-1.5 rounded-xl bg-white text-orange-700 font-bold text-xs sm:text-sm cursor-pointer shrink-0"
               >
@@ -2423,6 +2575,7 @@ export default function App() {
                         const next = !isTestMode;
                         setIsTestMode(next);
                         saveDailyTestMode(next);
+                        pushConfigSnapshotRef.current({ isTestMode: String(next) }, true);
                         afterClick();
                       }}
                       className={btnClass}
@@ -2708,6 +2861,7 @@ export default function App() {
             foodShopNameEn={foodShopNameEn}
             lineShopUrl={lineShopUrl}
             lineQrImageUrl={lineQrImageUrl}
+            shopLocation={shopLocation}
             isMerchantView={true}
             onAddMenuItem={(item, options) => {
               const tasteNote = options?.tasteNote?.trim() || undefined;
@@ -2863,6 +3017,7 @@ export default function App() {
         scriptUrl={scriptUrl}
         mascotMode={checkoutState.source === 'menu' ? 'krua' : 'kids'}
         outfits={bearOutfits}
+        isTestMode={isTestMode}
         lineShopUrl={lineShopUrl}
         lineQrImageUrl={lineQrImageUrl}
         deliveryInfo={checkoutState.deliveryInfo}
@@ -3090,6 +3245,8 @@ export default function App() {
           onSyncAllNow={syncAllBackendNow}
           onFlushQueueNow={() => flushOfflineQueue(scriptUrl)}
           supabaseOrdersVersion={supabaseOrdersVersion}
+          shopLocation={shopLocation}
+          onChangeShopLocation={handleChangeShopLocation}
         />
       )}
     </div>
